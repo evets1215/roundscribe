@@ -1,26 +1,117 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  /* Roundscribe "Clinical Authority" Design Tokens */
+
+  /* Primary — Deep Sea Teal */
+  --color-primary: #004655;
+  --color-primary-container: #005f73;
+  --color-primary-fixed: #b2ebff;
+  --color-primary-fixed-dim: #8bd1e8;
+  --color-on-primary: #ffffff;
+  --color-on-primary-container: #91d7ee;
+  --color-on-primary-fixed: #001f27;
+  --color-on-primary-fixed-variant: #004e5f;
+  --color-inverse-primary: #8bd1e8;
+
+  /* Secondary */
+  --color-secondary: #48626e;
+  --color-secondary-container: #cbe7f5;
+  --color-secondary-fixed: #cbe7f5;
+  --color-secondary-fixed-dim: #afcbd8;
+  --color-on-secondary: #ffffff;
+  --color-on-secondary-container: #4e6874;
+  --color-on-secondary-fixed: #021f29;
+  --color-on-secondary-fixed-variant: #304a55;
+
+  /* Tertiary — Medical Teal */
+  --color-tertiary: #00474e;
+  --color-tertiary-container: #006069;
+  --color-tertiary-fixed: #92f1fe;
+  --color-tertiary-fixed-dim: #75d5e2;
+  --color-on-tertiary: #ffffff;
+  --color-on-tertiary-container: #7bdbe8;
+  --color-on-tertiary-fixed: #001f23;
+  --color-on-tertiary-fixed-variant: #004f56;
+
+  /* Error */
+  --color-error: #ba1a1a;
+  --color-error-container: #ffdad6;
+  --color-on-error: #ffffff;
+  --color-on-error-container: #93000a;
+
+  /* Surface Tiers */
+  --color-background: #f8f9fa;
+  --color-on-background: #191c1d;
+  --color-surface: #f8f9fa;
+  --color-surface-dim: #d9dadb;
+  --color-surface-bright: #f8f9fa;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f3f4f5;
+  --color-surface-container: #edeeef;
+  --color-surface-container-high: #e7e8e9;
+  --color-surface-container-highest: #e1e3e4;
+  --color-surface-variant: #e1e3e4;
+  --color-surface-tint: #13677b;
+  --color-on-surface: #191c1d;
+  --color-on-surface-variant: #3f484c;
+  --color-inverse-surface: #2e3132;
+  --color-inverse-on-surface: #f0f1f2;
+
+  /* Outline */
+  --color-outline: #6f797c;
+  --color-outline-variant: #bfc8cc;
+
+  /* Fonts */
+  --font-headline: "Manrope", sans-serif;
+  --font-body: "Inter", sans-serif;
+  --font-label: "Inter", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* Diff highlight classes from Stitch prototype */
+.diff-addition {
+  background-color: #f0fdf4;
+  color: #166534;
+  padding: 0 4px;
+  border-radius: 2px;
 }
+
+.diff-deletion {
+  background-color: #fef2f2;
+  color: #991b1b;
+  text-decoration: line-through;
+  padding: 0 4px;
+  border-radius: 2px;
+  opacity: 0.7;
+}
+
+.change-row:hover .accept-btn {
+  opacity: 1;
+}
+
+.accept-btn {
+  opacity: 0;
+  transition: opacity 0.2s ease-in-out;
+}
+
+/* Material Symbols */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+  vertical-align: middle;
+}
+
+/* Hide scrollbars utility */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #f3f4f5; }
+::-webkit-scrollbar-thumb { background: #bfc8cc; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #6f797c; }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--color-surface);
+  color: var(--color-on-surface);
+  font-family: var(--font-body);
 }
