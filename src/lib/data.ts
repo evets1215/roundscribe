@@ -93,6 +93,8 @@ export const garyBaileyNote = {
     room: "402-A",
     age: 75,
     sex: "MALE",
+    mrn: "00-114-8823",
+    dob: "02/14/1951",
   },
   yesterday: {
     date: "Oct 23 • 08:15 AM",

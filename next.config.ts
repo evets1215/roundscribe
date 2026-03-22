@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // (Keep default config for Next.js 16. If you hit upload limits in production,
+  // configure your hosting/proxy layer or chunk uploads.)
 };
 
 export default nextConfig;
