@@ -26,12 +26,24 @@ export default function PatientDetailPage() {
   const [transcribeState, setTranscribeState] = useState<TranscribeState>({ status: "idle" });
 
   const [acceptedChanges, setAcceptedChanges] = useState<Set<string>>(new Set());
-  const [showIcd, setShowIcd] = useState(true);
-  const [mobilePane, setMobilePane] = useState<"note" | "yesterday" | "icd">("note");
+  const [mobilePane, setMobilePane] = useState<"note" | "prior">("note");
   const [showNotifications, setShowNotifications] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [showIcdSearch, setShowIcdSearch] = useState(false);
-  const [icdSearchQuery, setIcdSearchQuery] = useState("");
+  const [previousNote, setPreviousNote] = useState<string>(() =>
+    [
+      `Date: ${yesterday.date}`,
+      `Patient: ${patient.name}`,
+      "",
+      "SUBJECTIVE",
+      yesterday.subjective,
+      "",
+      "ASSESSMENT & PLAN",
+      ...yesterday.problems.map((p) => `${p.label}: ${p.text}`),
+      "",
+      "SOCIAL",
+      yesterday.social,
+    ].join("\n")
+  );
 
   const recorder = useAudioRecorder();
 
@@ -42,6 +54,7 @@ export default function PatientDetailPage() {
     const form = new FormData();
     form.append("audio", recorder.audioBlob, "recording.webm");
     form.append("patientId", patientId);
+    form.append("previousNote", previousNote);
 
     let result: { noteId: string; transcript: string; note: StructuredNote };
     try {
@@ -266,15 +279,14 @@ export default function PatientDetailPage() {
           <div className="md:hidden px-4 pb-3">
             <div className="flex rounded-xl p-1" style={{ backgroundColor: "#f1f3f4" }}>
               {[
-                { key: "note", label: "Note" },
-                { key: "yesterday", label: "Yesterday" },
-                { key: "icd", label: "ICD-10" },
+                { key: "note", label: "Updated Note" },
+                { key: "prior", label: "Prior Note" },
               ].map((t) => {
-                const active = mobilePane === (t.key as "note" | "yesterday" | "icd");
+                const active = mobilePane === (t.key as "note" | "prior");
                 return (
                   <button
                     key={t.key}
-                    onClick={() => setMobilePane(t.key as "note" | "yesterday" | "icd")}
+                    onClick={() => setMobilePane(t.key as "note" | "prior")}
                     className="flex-1 py-2 rounded-lg text-sm font-semibold transition-all"
                     style={
                       active
@@ -296,12 +308,12 @@ export default function PatientDetailPage() {
           <div
             className="flex flex-col h-full gap-0 md:gap-4 md:grid"
             style={{
-              gridTemplateColumns: showIcd ? "3fr 6fr 3fr" : "3fr 9fr",
+              gridTemplateColumns: "5fr 7fr",
             }}
           >
-            {/* Column 1: Yesterday's Note */}
+            {/* Column 1: Prior Note (paste area) */}
             <div
-              className={`${mobilePane === "yesterday" ? "flex" : "hidden"} md:flex flex-col flex-1 md:rounded-xl overflow-hidden md:shadow-sm`}
+              className={`${mobilePane === "prior" ? "flex" : "hidden"} md:flex flex-col flex-1 md:rounded-xl overflow-hidden md:shadow-sm`}
               style={{
                 backgroundColor: "var(--color-surface-container-low)",
                 border: "none",
@@ -316,36 +328,71 @@ export default function PatientDetailPage() {
                 }}
               >
                 <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: "var(--color-on-surface-variant)" }}>
-                  Yesterday&apos;s Note
+                  Prior Note from EHR
                 </span>
-                <span className="text-[10px] font-medium" style={{ color: "var(--color-outline)" }}>
-                  {yesterday.date}
-                </span>
+                <button
+                  onClick={() => setPreviousNote("")}
+                  className="text-[10px] font-medium hover:underline transition-colors"
+                  style={{ color: "var(--color-outline)" }}
+                  title="Clear and paste your own note"
+                >
+                  Clear
+                </button>
               </div>
-              {/* Mobile document header */}
+              {/* Mobile header */}
               <div className="md:hidden px-5 pt-5 pb-3 flex items-center justify-between shrink-0">
-                <span className="font-bold text-base" style={{ color: "var(--color-on-surface)" }}>Yesterday</span>
-                <span className="text-xs" style={{ color: "var(--color-on-surface-variant)" }}>{yesterday.date}</span>
+                <span className="font-bold text-base" style={{ color: "var(--color-on-surface)" }}>Prior Note</span>
+                <button
+                  onClick={() => setPreviousNote("")}
+                  className="text-xs"
+                  style={{ color: "var(--color-outline)" }}
+                >
+                  Clear
+                </button>
               </div>
-              <div
-                className="px-5 md:p-6 pb-6 text-sm md:text-xs leading-relaxed overflow-y-auto flex-1"
-                style={{ fontFamily: "var(--font-body)", color: "rgba(63,72,76,0.8)" }}
-              >
-                <h4 className="font-bold mb-2" style={{ color: "var(--color-on-surface)" }}>Subjective</h4>
-                <p className="mb-4">{yesterday.subjective}</p>
-                <h4 className="font-bold mt-6 mb-2" style={{ color: "var(--color-on-surface)" }}>Assessment &amp; Plan</h4>
-                {yesterday.problems.map((p) => (
-                  <div key={p.label} className="mb-4">
-                    <span className="font-semibold block" style={{ color: "var(--color-on-surface)" }}>{p.label}:</span>{" "}
-                    {p.text}
-                  </div>
-                ))}
-                <h4 className="font-bold mt-6 mb-2" style={{ color: "var(--color-on-surface)" }}>Social</h4>
-                <p>{yesterday.social}</p>
-              </div>
+              {previousNote === "" ? (
+                <div className="flex-1 flex flex-col items-center justify-center px-6 py-8 gap-3">
+                  <span className="material-symbols-outlined text-4xl" style={{ color: "var(--color-outline)" }}>content_paste</span>
+                  <p className="text-xs text-center leading-relaxed" style={{ color: "var(--color-on-surface-variant)" }}>
+                    Paste the patient&apos;s prior note from Epic or Cerner here.
+                    <br />RoundScribe will use it as context when generating the updated note.
+                  </p>
+                  <textarea
+                    className="w-full mt-2 p-3 rounded-lg text-xs resize-none focus:outline-none"
+                    style={{
+                      fontFamily: "var(--font-body)",
+                      border: "1px solid rgba(191,200,204,0.5)",
+                      backgroundColor: "white",
+                      color: "var(--color-on-surface)",
+                      minHeight: "160px",
+                    }}
+                    placeholder="Paste prior note here…"
+                    onPaste={(e) => {
+                      const text = e.clipboardData.getData("text");
+                      if (text) {
+                        e.preventDefault();
+                        setPreviousNote(text);
+                      }
+                    }}
+                    onChange={(e) => setPreviousNote(e.target.value)}
+                  />
+                </div>
+              ) : (
+                <textarea
+                  className="flex-1 px-5 py-5 md:p-6 text-sm md:text-xs leading-relaxed resize-none focus:outline-none"
+                  style={{
+                    fontFamily: "var(--font-body)",
+                    color: "rgba(63,72,76,0.8)",
+                    backgroundColor: "transparent",
+                  }}
+                  value={previousNote}
+                  onChange={(e) => setPreviousNote(e.target.value)}
+                  placeholder="Paste prior note from EHR…"
+                />
+              )}
             </div>
 
-            {/* Column 2: Updated Note (Embedded Editor) */}
+            {/* Column 2: Updated Note (Generated / Editor) */}
             <div
               className={`${mobilePane === "note" ? "flex" : "hidden"} md:flex flex-col flex-1 md:rounded-xl overflow-hidden md:shadow-md relative`}
               style={{
@@ -395,22 +442,14 @@ export default function PatientDetailPage() {
                     <span className="material-symbols-outlined text-sm">edit</span>
                     Edit
                   </button>
-                  {/* Desktop: copy + ICD toggle */}
+                  {/* Desktop: Copy to EHR */}
                   <button
                     onClick={handleCopy}
                     className="hidden md:flex items-center gap-1 px-2.5 py-1.5 rounded-md transition-all text-slate-600 hover:bg-slate-100"
                     title={copied ? "Copied!" : "Copy note to clipboard"}
                   >
                     <span className="material-symbols-outlined text-base">{copied ? "check" : "content_copy"}</span>
-                    <span className="text-[10px] font-bold">{copied ? "Copied!" : "Copy"}</span>
-                  </button>
-                  <button
-                    onClick={() => setShowIcd((v) => !v)}
-                    className="hidden md:flex items-center gap-1.5 px-3 py-1.5 bg-white rounded-md text-[10px] font-bold transition-all hover:bg-slate-50"
-                    style={{ border: "1px solid rgba(0,70,85,0.3)", color: "var(--color-primary)" }}
-                  >
-                    <span className="material-symbols-outlined text-base">{showIcd ? "label_off" : "label"}</span>
-                    ICD-10
+                    <span className="text-[10px] font-bold">{copied ? "Copied!" : "Copy to EHR"}</span>
                   </button>
                 </div>
               </div>
@@ -721,132 +760,6 @@ export default function PatientDetailPage() {
               </button>
             </div>
 
-            {/* Column 3: ICD-10 Suggestions */}
-            {showIcd && (
-              <div
-                className={`${mobilePane === "icd" ? "flex" : "hidden"} md:flex flex-col flex-1 md:rounded-xl overflow-hidden md:shadow-sm`}
-                style={{
-                  backgroundColor: "rgba(243,244,245,0.5)",
-                  border: "1px solid rgba(191,200,204,0.3)",
-                }}
-              >
-                {/* Desktop column header */}
-                <div
-                  className="hidden md:flex px-5 py-4 items-center justify-between shrink-0"
-                  style={{
-                    backgroundColor: "rgba(231,232,233,0.6)",
-                    borderBottom: "1px solid rgba(191,200,204,0.2)",
-                  }}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="material-symbols-outlined text-sm" style={{ color: "var(--color-primary)" }}>label</span>
-                    <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: "var(--color-primary)" }}>
-                      ICD-10 Suggestions
-                    </span>
-                  </div>
-                  <span
-                    className="text-[10px] px-2 py-0.5 rounded font-bold"
-                    style={{
-                      backgroundColor: "var(--color-primary-container)",
-                      color: "var(--color-on-primary-container)",
-                    }}
-                  >
-                    {icdCodes.length} CODES
-                  </span>
-                </div>
-                {/* Mobile header */}
-                <div className="md:hidden px-5 pt-5 pb-3 flex items-center justify-between shrink-0">
-                  <span className="font-bold text-base" style={{ color: "var(--color-on-surface)" }}>ICD-10 Suggestions</span>
-                  <span
-                    className="text-[10px] px-2 py-0.5 rounded font-bold"
-                    style={{
-                      backgroundColor: "var(--color-primary-container)",
-                      color: "var(--color-on-primary-container)",
-                    }}
-                  >
-                    {icdCodes.length} codes
-                  </span>
-                </div>
-
-                <div className="p-5 flex flex-col h-full overflow-hidden">
-                  <p className="text-[10px] mb-4 font-medium italic" style={{ color: "var(--color-on-surface-variant)" }}>
-                    Suggested based on the problem list:
-                  </p>
-                  <div className="flex-1 overflow-y-auto space-y-3 pr-1">
-                    {icdCodes.map((icd) => (
-                      <div
-                        key={icd.code}
-                        onClick={() => insertIcdCode(icd)}
-                        className="p-3 rounded-lg shadow-sm cursor-pointer group transition-colors hover:bg-white"
-                        style={{
-                          backgroundColor: "var(--color-surface-container-lowest)",
-                          border: "1px solid rgba(191,200,204,0.3)",
-                        }}
-                        title="Click to insert into note"
-                      >
-                        <div className="flex justify-between items-start mb-1">
-                          <span className="font-bold text-[10px] uppercase tracking-wider" style={{ color: "var(--color-primary)" }}>
-                            {icd.code}
-                          </span>
-                          <span
-                            className="material-symbols-outlined text-base opacity-0 group-hover:opacity-100 transition-opacity"
-                            style={{ color: "var(--color-primary)" }}
-                          >
-                            add_circle
-                          </span>
-                        </div>
-                        <p className="text-[11px] font-bold leading-tight mb-1" style={{ color: "var(--color-on-surface)" }}>
-                          {icd.description}
-                        </p>
-                        <p className="text-[10px]" style={{ color: "var(--color-on-surface-variant)" }}>
-                          Mapped: <span className="font-semibold">{icd.mapped}</span>
-                        </p>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="mt-4 pt-4" style={{ borderTop: "1px solid rgba(191,200,204,0.2)" }}>
-                    <button
-                      onClick={() => setShowIcdSearch((v) => !v)}
-                      className="w-full py-2 bg-white rounded font-bold text-[10px] transition-all flex items-center justify-center gap-2 hover:bg-slate-50"
-                      style={{ border: "1px solid rgba(0,70,85,0.3)", color: "var(--color-primary)" }}
-                    >
-                      <span className="material-symbols-outlined text-sm">search</span>
-                      Search All ICD-10
-                    </button>
-                    {showIcdSearch && (
-                      <div
-                        className="mt-2 rounded-lg overflow-hidden"
-                        style={{ border: "1px solid var(--color-outline-variant)" }}
-                      >
-                        <div className="flex items-center gap-2 px-3 py-2 bg-white">
-                          <span className="material-symbols-outlined text-sm" style={{ color: "var(--color-outline)" }}>search</span>
-                          <input
-                            type="text"
-                            value={icdSearchQuery}
-                            onChange={(e) => setIcdSearchQuery(e.target.value)}
-                            placeholder="Search ICD-10 codes…"
-                            className="flex-1 text-[11px] bg-transparent border-none focus:outline-none"
-                            style={{ fontFamily: "var(--font-body)" }}
-                          />
-                        </div>
-                        <div
-                          className="px-3 py-2 text-[10px] text-center"
-                          style={{ color: "var(--color-on-surface-variant)", backgroundColor: "var(--color-surface-container-low)" }}
-                        >
-                          {icdSearchQuery.trim()
-                            ? `No results for "${icdSearchQuery}" — full ICD-10 database not yet connected.`
-                            : "Type to search the full ICD-10 database."}
-                        </div>
-                      </div>
-                    )}
-                    <p className="text-[9px] mt-4 leading-tight" style={{ color: "var(--color-outline)" }}>
-                      AI generated. Verify before billing.
-                    </p>
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         </div>
 
