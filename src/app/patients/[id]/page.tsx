@@ -54,6 +54,7 @@ export default function PatientDetailPage() {
     form.append("audio", recorder.audioBlob, "recording.webm");
     form.append("patientId", patientId);
     form.append("previousNote", previousNote);
+    if (recorder.transcript) form.append("transcript", recorder.transcript);
 
     let result: { noteId: string; transcript: string; note: StructuredNote };
     try {

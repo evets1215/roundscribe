@@ -64,6 +64,8 @@ export async function POST(request: Request) {
 
   const patientId = (formData.get("patientId") as string | null) ?? undefined;
   const previousNote = (formData.get("previousNote") as string | null) ?? undefined;
+  // Browser speech recognition transcript — if present, skip MedASR entirely
+  const browserTranscript = (formData.get("transcript") as string | null) ?? undefined;
 
   const isDev = process.env.NODE_ENV === "development";
 
@@ -100,41 +102,47 @@ export async function POST(request: Request) {
   }
 
   // -------------------------------------------------------------------------
-  // 3. Store audio + Transcribe with MedASR
+  // 3. Store audio + Transcribe
+  //    If the browser already sent a transcript, skip MedASR entirely.
   // -------------------------------------------------------------------------
   let transcript: string;
   let audioKey: string | undefined;
   const mimeType = audioFile.type || "audio/webm";
 
-  try {
-    const buffer = Buffer.from(await audioFile.arrayBuffer());
+  if (browserTranscript) {
+    // Use browser speech recognition transcript directly
+    transcript = browserTranscript;
+    console.log("[transcribe] Using browser transcript:", transcript.slice(0, 100));
+  } else {
+    try {
+      const buffer = Buffer.from(await audioFile.arrayBuffer());
 
-    const stored = await storage.putAudio({
-      patientId: patientId ?? "unknown",
-      contentType: mimeType,
-      bytes: new Uint8Array(buffer),
-    });
-    audioKey = stored.key;
-
-    // Persist AudioRecording row if we have a real patient (skip in dev — no DB)
-    if (patientId && !isDev) {
-      await prisma.audioRecording.create({
-        data: {
-          patientId,
-          storageKey: audioKey,
-          mimeType,
-          sizeBytes: audioFile.size,
-        },
+      const stored = await storage.putAudio({
+        patientId: patientId ?? "unknown",
+        contentType: mimeType,
+        bytes: new Uint8Array(buffer),
       });
-    }
+      audioKey = stored.key;
 
-    transcript = await medasr.transcribe(buffer, mimeType);
-  } catch (err) {
-    console.error("[transcribe] MedASR/storage error:", err);
-    return NextResponse.json(
-      { error: `Transcription failed: ${(err as Error).message}` },
-      { status: 500 },
-    );
+      if (patientId && !isDev) {
+        await prisma.audioRecording.create({
+          data: {
+            patientId,
+            storageKey: audioKey,
+            mimeType,
+            sizeBytes: audioFile.size,
+          },
+        });
+      }
+
+      transcript = await medasr.transcribe(buffer, mimeType);
+    } catch (err) {
+      console.error("[transcribe] MedASR/storage error:", err);
+      return NextResponse.json(
+        { error: `Transcription failed: ${(err as Error).message}` },
+        { status: 500 },
+      );
+    }
   }
 
   // -------------------------------------------------------------------------
