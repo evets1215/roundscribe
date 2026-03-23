@@ -38,8 +38,7 @@ export default function PatientDetailPage() {
       yesterday.subjective,
       "",
       "ASSESSMENT & PLAN",
-      ...yesterday.problems.map((p) => `${p.label}: ${p.text}`),
-      "",
+      ...yesterday.problems.flatMap((p) => [`#${p.label}`, p.text, ""]),
       "SOCIAL",
       yesterday.social,
     ].join("\n")
@@ -73,21 +72,10 @@ export default function PatientDetailPage() {
 
     setTranscribeState({ status: "done", ...result });
 
-    // Insert the structured note into the editor
+    // Replace the editor content with the full updated note
     const editor = editorRef.current;
-    if (editor) {
-      const { note } = result;
-      let insertText = "\n\n— Transcribed Note —\n";
-      if (note.format === "SOAP") {
-        if (note.subjective) insertText += `\nSubjective:\n${note.subjective}`;
-        if (note.objective) insertText += `\n\nObjective:\n${note.objective}`;
-        if (note.assessment) insertText += `\n\nAssessment:\n${note.assessment}`;
-        if (note.plan) insertText += `\n\nPlan:\n${note.plan}`;
-      } else {
-        insertText += "\n" + (note.bullets ?? []).map((b) => `• ${b}`).join("\n");
-      }
-      editor.focus();
-      document.execCommand("insertText", false, insertText);
+    if (editor && result.note.rawText) {
+      editor.innerText = result.note.rawText;
     }
   };
 

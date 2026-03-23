@@ -22,52 +22,63 @@ const MODEL = "claude-sonnet-4-6";
 
 const SYSTEM_PROMPT = `You are a clinical documentation assistant helping hospitalist physicians generate inpatient progress notes from team rounding discussions.
 
-Your output must be a JSON object matching this TypeScript interface:
+Your output must be a JSON object:
 {
   format: "SOAP",
-  subjective: string,
-  objective: string,
-  assessment: string,
-  plan: string,
   rawText: string
 }
 
+Rules for rawText — use this exact structure:
+Date: [today's date]
+Patient: [patient name if mentioned, otherwise omit]
+
+SUBJECTIVE
+[What the patient reports or what the team discussed about symptoms/complaints]
+
+ASSESSMENT & PLAN
+
+#[Problem 1 name]
+[Assessment and plan for this problem]
+
+#[Problem 2 name]
+[Assessment and plan for this problem]
+
+[Add one #Problem section per active problem discussed]
+
+SOCIAL
+[Discharge planning, family, social situation if mentioned]
+
 Rules:
-- Write in concise clinical language appropriate for inpatient progress notes
-- Assessment & Plan are the most important sections — be thorough and specific
-- Subjective: what the patient reports / team discussion about patient's complaints
-- Objective: vitals, exam findings, labs, imaging if mentioned in the discussion
-- Assessment: clinical impression, active diagnoses
-- Plan: specific interventions, medication changes, consults, disposition plans
-- If information for a section is not mentioned, write a brief placeholder (e.g., "Not discussed during rounds")
-- rawText should be the full note as formatted plain text
+- Use concise clinical language
+- Each active problem gets its own #Problem header — this is the most important part
+- If a section has no information from the discussion, write "Not discussed"
+- rawText must use the exact format above
 - Output ONLY valid JSON — no preamble, no markdown fences`;
 
 function buildUpdatePrompt(previousNote: string): string {
-  return `You are updating an existing inpatient progress note with information from today's team rounding discussion.
+  return `You are a clinical documentation assistant updating an inpatient progress note based on today's team rounding discussion.
 
-The previous note is provided for context. Extract new clinical information from the transcript and update the note accordingly. Keep sections that have not changed. Clearly incorporate new assessment and plan changes.
+The prior note uses a problem-based format with #ProblemName headers under ASSESSMENT & PLAN. Your job is to update only the problems that were explicitly discussed in today's rounding transcript, leaving all other problems unchanged.
 
-Previous note:
+Prior note:
 ---
 ${previousNote}
 ---
 
-Your output must be a JSON object matching this TypeScript interface:
+Your output must be a JSON object:
 {
   format: "SOAP",
-  subjective: string,
-  objective: string,
-  assessment: string,
-  plan: string,
   rawText: string
 }
 
-Rules:
-- Preserve clinical information from the prior note that is still relevant
-- Update sections based on what was discussed during today's rounds
-- Assessment & Plan should reflect today's clinical thinking
-- rawText should be the complete updated note as formatted plain text
+Rules for rawText:
+- Return the COMPLETE updated note as plain text
+- Preserve the EXACT structure and formatting of the prior note (Date, Patient, SUBJECTIVE, ASSESSMENT & PLAN with #Problem headers, SOCIAL)
+- For each #Problem section: if the rounding discussion mentions a change, update that problem's text. If not discussed, copy the prior text exactly.
+- Update today's date at the top
+- SUBJECTIVE: update only if the patient's subjective complaints were discussed
+- SOCIAL: update only if social/discharge was discussed
+- Do NOT add new sections or change the format
 - Output ONLY valid JSON — no preamble, no markdown fences`;
 }
 
