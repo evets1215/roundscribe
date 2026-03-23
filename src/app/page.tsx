@@ -19,17 +19,10 @@ const sortableColumns: { label: string; key: SortKey }[] = [
   { label: "Sex", key: "sex" },
 ];
 
-const SEX_OPTIONS: { label: string; value: "M" | "F" }[] = [
-  { label: "Male", value: "M" },
-  { label: "Female", value: "F" },
-];
-
 interface NewPatientForm {
   name: string;
   room: string;
   mrn: string;
-  dob: string;
-  sex: "M" | "F";
 }
 
 function Modal({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
@@ -68,10 +61,8 @@ export default function DashboardPage() {
 
   // Add patient form state
   const [newPatient, setNewPatient] = useState<NewPatientForm>({
-    name: "", room: "", mrn: "", dob: "", sex: "M",
+    name: "", room: "", mrn: "",
   });
-  const [addError, setAddError] = useState("");
-
 
   const roundedPatients = patients.filter((p) => p.status === "Updated").length;
 
@@ -114,32 +105,25 @@ export default function DashboardPage() {
   });
 
   const handleAddPatient = () => {
-    if (!newPatient.name.trim()) { setAddError("Name is required."); return; }
-    if (!newPatient.room.trim()) { setAddError("Room is required."); return; }
-    if (!newPatient.mrn.trim()) { setAddError("MRN is required."); return; }
-    if (!/^\d+$/.test(newPatient.mrn.trim())) { setAddError("MRN must be numeric."); return; }
-    setAddError("");
-
     const created: Patient = {
       id: `local-${Date.now()}`,
-      name: newPatient.name.trim(),
-      room: newPatient.room.trim().toUpperCase(),
-      mrn: newPatient.mrn.trim(),
-      dob: newPatient.dob || "",
-      sex: newPatient.sex,
+      name: newPatient.name.trim() || "New Patient",
+      room: newPatient.room.trim().toUpperCase() || "—",
+      mrn: newPatient.mrn.trim() || "—",
+      dob: "",
+      sex: "M",
       status: "Pending",
       lastNote: "Not started",
       pinned: false,
     };
 
     setPatients((prev) => [created, ...prev]);
-    setNewPatient({ name: "", room: "", mrn: "", dob: "", sex: "M" });
+    setNewPatient({ name: "", room: "", mrn: "" });
     setShowAddPatient(false);
   };
 
   const resetAddForm = () => {
-    setNewPatient({ name: "", room: "", mrn: "", dob: "", sex: "M" });
-    setAddError("");
+    setNewPatient({ name: "", room: "", mrn: "" });
     setShowAddPatient(false);
   };
 
@@ -227,50 +211,25 @@ export default function DashboardPage() {
         {/* Content area */}
         <div className="px-6 py-6 max-w-7xl mx-auto w-full flex-1">
           {/* Page title + stats */}
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6">
-            <div>
-              <h1
-                className="text-2xl font-extrabold tracking-tight"
-                style={{
-                  fontFamily: "var(--font-headline)",
-                  color: "var(--color-on-surface)",
-                }}
-              >
-                Active Patients
-              </h1>
-              <div className="flex items-center gap-4 mt-1">
-                <p
-                  className="text-xs font-medium"
-                  style={{ color: "var(--color-on-surface-variant)" }}
+          <div className="flex flex-col gap-4 mb-6">
+            <div className="flex items-end justify-between gap-4">
+              <div>
+                <h1
+                  className="text-[28px] md:text-2xl font-extrabold tracking-tight uppercase"
+                  style={{
+                    fontFamily: "var(--font-headline)",
+                    color: "var(--color-on-surface)",
+                    letterSpacing: "0.02em",
+                  }}
                 >
-                  {TOTAL_PATIENTS} Patients assigned
-                </p>
-                <div
-                  className="h-3 w-px"
-                  style={{ backgroundColor: "var(--color-outline-variant)" }}
-                />
-                <div className="flex items-center gap-2">
-                  <span
-                    className="text-xs font-bold"
-                    style={{ color: "var(--color-primary)" }}
-                  >
-                    Progress: {roundedPatients}/{TOTAL_PATIENTS}
-                  </span>
-                  <div
-                    className="w-24 h-1.5 rounded-full overflow-hidden"
-                    style={{
-                      backgroundColor: "var(--color-surface-container-highest)",
-                    }}
-                  >
-                    <div
-                      className="h-full rounded-full"
-                      style={{
-                        backgroundColor: "var(--color-primary)",
-                        width: `${(roundedPatients / TOTAL_PATIENTS) * 100}%`,
-                      }}
-                    />
-                  </div>
-                </div>
+                  Current Rounding List
+                </h1>
+              </div>
+              <div
+                className="text-base md:text-sm font-semibold shrink-0"
+                style={{ color: "var(--color-on-surface-variant)" }}
+              >
+                {patients.length} Patients
               </div>
             </div>
 
@@ -295,94 +254,84 @@ export default function DashboardPage() {
             }}
           >
             {/* Mobile: card list */}
-            <div className="md:hidden p-3 space-y-3">
-              {sortedPatients.map((patient) => (
-                <div
-                  key={patient.id}
-                  className="rounded-lg p-4"
-                  style={{
-                    backgroundColor: "var(--color-surface)",
-                    border: "1px solid var(--color-outline-variant)",
-                  }}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div
-                        className="text-[11px] font-bold uppercase tracking-wide"
-                        style={{ color: "var(--color-primary)" }}
-                      >
-                        {patient.room}
-                      </div>
-                      <div
-                        className="text-base font-extrabold truncate"
-                        style={{ color: "var(--color-on-surface)" }}
-                      >
-                        {patient.name}
-                      </div>
-                      <div
-                        className="mt-1 text-[11px]"
-                        style={{ color: "var(--color-on-surface-variant)" }}
-                      >
-                        MRN {patient.mrn} · {patient.dob} · {patient.sex}
-                      </div>
-                    </div>
+            <div className="md:hidden space-y-4">
+              {sortedPatients.map((patient) => {
+                const statusColor =
+                  patient.status === "Updated"
+                    ? "#67d7e5"
+                    : patient.status === "In Progress"
+                      ? "#f5bf3b"
+                      : "#c9d1d6";
 
-                    <button
-                      onClick={() => togglePin(patient.id)}
-                      className="shrink-0 p-2 rounded-md"
-                      title={patient.pinned ? "Unpin patient" : "Pin patient"}
-                      style={{ color: patient.pinned ? "var(--color-primary)" : "#cbd5e1" }}
-                    >
-                      <span
-                        className="material-symbols-outlined"
-                        style={patient.pinned ? { fontVariationSettings: "'FILL' 1" } : {}}
-                      >
-                        push_pin
-                      </span>
-                    </button>
-                  </div>
+                return (
+                  <div
+                    key={patient.id}
+                    onClick={() => router.push(`/patients/${patient.id}`)}
+                    className="rounded-[28px] px-5 py-6 cursor-pointer shadow-sm"
+                    style={{
+                      backgroundColor: "#ffffff",
+                      border: "1px solid #eef2f4",
+                      boxShadow: "0 2px 10px rgba(15,23,42,0.04)",
+                    }}
+                  >
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="flex items-center gap-4 min-w-0 flex-1">
+                        <div
+                          className="w-16 h-16 rounded-2xl flex items-center justify-center shrink-0 text-[18px] font-bold"
+                          style={{
+                            backgroundColor: "#edf4f7",
+                            color: "#0d5966",
+                          }}
+                        >
+                          {patient.room.replace(/[^0-9A-Z]/g, "") || "—"}
+                        </div>
 
-                  <div className="mt-3 flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <StatusBadge status={patient.status} />
-                      <span
-                        className="text-[11px] font-medium"
-                        style={{ color: "var(--color-on-surface-variant)" }}
-                      >
-                        Last: {patient.lastNote}
-                      </span>
-                    </div>
+                        <div className="min-w-0 flex-1">
+                          <div
+                            className="text-[20px] leading-tight font-semibold truncate"
+                            style={{ color: "#101418" }}
+                          >
+                            {patient.name}
+                          </div>
+                          <div className="mt-2 flex items-center gap-2">
+                            <span
+                              className="w-2.5 h-2.5 rounded-full shrink-0"
+                              style={{ backgroundColor: statusColor }}
+                            />
+                            <span
+                              className="text-[12px] font-medium uppercase tracking-[0.12em]"
+                              style={{ color: "#7b8790" }}
+                            >
+                              {patient.status}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
 
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => router.push(`/patients/${patient.id}?record=1`)}
-                        className="p-2 rounded-md transition-colors hover:bg-slate-100"
-                        title="Start Recording"
-                        style={{ color: "var(--color-primary)" }}
-                      >
-                        <span className="material-symbols-outlined">mic</span>
-                      </button>
-                      <Link
-                        href={`/patients/${patient.id}`}
-                        className="px-3 py-2 rounded-md text-xs font-bold uppercase tracking-wider"
-                        style={{
-                          backgroundColor: "var(--color-primary)",
-                          color: "white",
-                        }}
-                      >
-                        Open
-                      </Link>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            router.push(`/patients/${patient.id}?record=1`);
+                          }}
+                          className="w-11 h-11 rounded-full flex items-center justify-center transition-colors"
+                          title="Start Recording"
+                          style={{ color: "#0d5966" }}
+                        >
+                          <span className="material-symbols-outlined text-[30px]">mic</span>
+                        </button>
+                      </div>
                     </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
 
               {sortedPatients.length === 0 && (
                 <div
-                  className="rounded-lg p-6 text-center text-sm"
+                  className="rounded-[28px] p-6 text-center text-sm"
                   style={{
-                    backgroundColor: "var(--color-surface)",
-                    border: "1px solid var(--color-outline-variant)",
+                    backgroundColor: "#ffffff",
+                    border: "1px solid #eef2f4",
                     color: "var(--color-on-surface-variant)",
                   }}
                 >
@@ -441,7 +390,7 @@ export default function DashboardPage() {
                       className="px-4 py-2.5 text-[11px] font-bold uppercase tracking-wider text-right"
                       style={{ color: "var(--color-on-surface-variant)" }}
                     >
-                      Action
+                      Record
                     </th>
                   </tr>
                 </thead>
@@ -449,7 +398,8 @@ export default function DashboardPage() {
                   {sortedPatients.map((patient) => (
                     <tr
                       key={patient.id}
-                      className="group transition-colors hover:bg-slate-50/50"
+                      onClick={() => router.push(`/patients/${patient.id}`)}
+                      className="group transition-colors hover:bg-slate-50/50 cursor-pointer"
                       style={{
                         borderBottom: "1px solid var(--color-outline-variant)",
                       }}
@@ -534,11 +484,14 @@ export default function DashboardPage() {
                         {patient.sex}
                       </td>
 
-                      {/* Action */}
+                      {/* Record */}
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-2">
                           <button
-                            onClick={() => router.push(`/patients/${patient.id}?record=1`)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              router.push(`/patients/${patient.id}?record=1`);
+                            }}
                             className="p-1.5 rounded-full transition-colors hover:bg-slate-100"
                             title="Start Recording"
                             style={{ color: "var(--color-primary)" }}
@@ -554,22 +507,6 @@ export default function DashboardPage() {
                               mic
                             </span>
                           </button>
-                          <Link
-                            href={`/patients/${patient.id}`}
-                            className="font-bold text-[11px] hover:underline uppercase tracking-wider w-16 text-right"
-                            style={{
-                              color:
-                                patient.status === "Updated"
-                                  ? "var(--color-on-surface-variant)"
-                                  : "var(--color-primary)",
-                            }}
-                          >
-                            {patient.status === "Pending"
-                              ? "Round"
-                              : patient.status === "In Progress"
-                              ? "Resume"
-                              : "View"}
-                          </Link>
                         </div>
                       </td>
                     </tr>
@@ -623,9 +560,15 @@ export default function DashboardPage() {
 
       {/* ── Add Patient Modal ── */}
       {showAddPatient && (
-        <Modal onClose={resetAddForm}>
+        <div
+          className="fixed inset-0 z-50"
+          style={{ backgroundColor: "rgba(0,0,0,0.35)" }}
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) resetAddForm();
+          }}
+        >
           <div
-            className="w-full max-w-md mx-0 md:mx-4 rounded-t-2xl md:rounded-xl shadow-xl p-5 md:p-6 fixed bottom-0 left-0 right-0 md:static max-h-[88vh] overflow-y-auto"
+            className="w-full max-w-md mx-0 md:mx-auto rounded-t-2xl md:rounded-xl shadow-xl p-5 md:p-6 fixed bottom-0 left-0 right-0 md:top-1/2 md:bottom-auto md:-translate-y-1/2 max-h-[88vh] overflow-y-auto"
             style={{ backgroundColor: "white" }}
           >
             <div className="flex items-center justify-between mb-5">
@@ -648,7 +591,7 @@ export default function DashboardPage() {
               {/* Name */}
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
-                  Full Name <span style={{ color: "var(--color-error)" }}>*</span>
+                  Full Name
                 </label>
                 <input
                   type="text"
@@ -664,7 +607,7 @@ export default function DashboardPage() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
-                    Room <span style={{ color: "var(--color-error)" }}>*</span>
+                    Room
                   </label>
                   <input
                     type="text"
@@ -677,7 +620,7 @@ export default function DashboardPage() {
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
-                    MRN <span style={{ color: "var(--color-error)" }}>*</span>
+                    MRN
                   </label>
                   <input
                     type="text"
@@ -690,50 +633,6 @@ export default function DashboardPage() {
                 </div>
               </div>
 
-              {/* DOB + Sex */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
-                    Date of Birth
-                  </label>
-                  <input
-                    type="date"
-                    value={newPatient.dob}
-                    onChange={(e) => setNewPatient((p) => ({ ...p, dob: e.target.value }))}
-                    className="w-full px-3 py-2 text-sm rounded-lg border focus:outline-none focus:ring-2"
-                    style={{ borderColor: "var(--color-outline-variant)", fontFamily: "var(--font-body)" }}
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
-                    Sex
-                  </label>
-                  <div className="flex gap-2 pt-1">
-                    {SEX_OPTIONS.map(({ label, value }) => (
-                      <button
-                        key={value}
-                        type="button"
-                        onClick={() => setNewPatient((p) => ({ ...p, sex: value }))}
-                        className="flex-1 py-2 rounded-lg text-xs font-bold border transition-all"
-                        style={
-                          newPatient.sex === value
-                            ? { backgroundColor: "var(--color-primary)", color: "white", borderColor: "var(--color-primary)" }
-                            : { backgroundColor: "white", color: "var(--color-on-surface-variant)", borderColor: "var(--color-outline-variant)" }
-                        }
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-
-              {/* Validation error */}
-              {addError && (
-                <p className="text-xs font-medium" style={{ color: "var(--color-error)" }}>
-                  {addError}
-                </p>
-              )}
             </div>
 
             <div className="flex gap-3 mt-6">
@@ -753,7 +652,7 @@ export default function DashboardPage() {
               </button>
             </div>
           </div>
-        </Modal>
+        </div>
       )}
 
       {/* ── Compliance Modal ── */}
