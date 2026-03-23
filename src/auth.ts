@@ -29,6 +29,9 @@ export const { handlers, signIn, signOut, auth } = NextAuth({
 
   callbacks: {
     authorized({ auth: session, request: { nextUrl } }) {
+      // In development, bypass auth so the pipeline can be tested without OAuth
+      if (process.env.NODE_ENV === "development") return true;
+
       const isLoggedIn = !!session?.user;
       const isLoginPage = nextUrl.pathname.startsWith("/login");
       const isAuthApi = nextUrl.pathname.startsWith("/api/auth");

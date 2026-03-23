@@ -37,10 +37,12 @@ export async function POST(request: Request) {
   // 0. Auth check
   // -------------------------------------------------------------------------
   const session = await auth();
-  if (!session?.user?.id) {
+  const userId =
+    session?.user?.id ??
+    (process.env.NODE_ENV === "development" ? "dev-user" : null);
+  if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const userId = session.user.id;
 
   // -------------------------------------------------------------------------
   // 1. Parse multipart form data
@@ -63,8 +65,10 @@ export async function POST(request: Request) {
   const patientId = (formData.get("patientId") as string | null) ?? undefined;
   const previousNote = (formData.get("previousNote") as string | null) ?? undefined;
 
-  // If a patientId is provided, verify the current user owns it
-  if (patientId) {
+  const isDev = process.env.NODE_ENV === "development";
+
+  // If a patientId is provided, verify the current user owns it (skip in dev)
+  if (patientId && !isDev) {
     const patient = await prisma.patient.findFirst({ where: { id: patientId, userId } });
     if (!patient) {
       return NextResponse.json({ error: "Patient not found" }, { status: 404 });
@@ -112,8 +116,8 @@ export async function POST(request: Request) {
     });
     audioKey = stored.key;
 
-    // Persist AudioRecording row if we have a real patient
-    if (patientId) {
+    // Persist AudioRecording row if we have a real patient (skip in dev — no DB)
+    if (patientId && !isDev) {
       await prisma.audioRecording.create({
         data: {
           patientId,
@@ -154,8 +158,8 @@ export async function POST(request: Request) {
   // 5. Persist Note in DB (and update patient status if applicable)
   // -------------------------------------------------------------------------
   let dbNoteId: string;
-  try {
-    if (patientId) {
+  if (!isDev && patientId) {
+    try {
       const dbNote = await prisma.note.create({
         data: {
           patientId,
@@ -166,7 +170,6 @@ export async function POST(request: Request) {
       });
       dbNoteId = dbNote.id;
 
-      // Update patient status to "In Progress" if still Pending
       await prisma.patient.updateMany({
         where: { id: patientId, status: "Pending" },
         data: { status: "In Progress" },
@@ -180,16 +183,16 @@ export async function POST(request: Request) {
           details: { noteId: dbNote.id, audioKey },
         },
       });
-    } else {
-      // No patient association — generate a transient id
-      dbNoteId = crypto.randomUUID();
+    } catch (err) {
+      console.error("[transcribe] DB persist error:", err);
+      return NextResponse.json(
+        { error: `Failed to persist note: ${(err as Error).message}` },
+        { status: 500 },
+      );
     }
-  } catch (err) {
-    console.error("[transcribe] DB persist error:", err);
-    return NextResponse.json(
-      { error: `Failed to persist note: ${(err as Error).message}` },
-      { status: 500 },
-    );
+  } else {
+    // Dev mode or no patient — generate a transient id, skip DB
+    dbNoteId = crypto.randomUUID();
   }
 
   return NextResponse.json({
