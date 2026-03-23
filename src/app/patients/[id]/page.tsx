@@ -24,6 +24,7 @@ export default function PatientDetailPage() {
   const editorRef = useRef<HTMLDivElement>(null);
 
   const [transcribeState, setTranscribeState] = useState<TranscribeState>({ status: "idle" });
+  const [editableTranscript, setEditableTranscript] = useState<string>("");
 
   const [acceptedChanges, setAcceptedChanges] = useState<Set<string>>(new Set());
   const [mobilePane, setMobilePane] = useState<"note" | "prior">("note");
@@ -54,7 +55,7 @@ export default function PatientDetailPage() {
     form.append("audio", recorder.audioBlob, "recording.webm");
     form.append("patientId", patientId);
     form.append("previousNote", previousNote);
-    if (recorder.transcript) form.append("transcript", recorder.transcript);
+    if (editableTranscript) form.append("transcript", editableTranscript);
 
     let result: { noteId: string; transcript: string; note: StructuredNote };
     try {
@@ -79,6 +80,13 @@ export default function PatientDetailPage() {
       editor.innerText = result.note.rawText;
     }
   };
+
+  // When recording stops, copy the captured transcript into the editable field
+  useEffect(() => {
+    if (!recorder.isRecording && recorder.transcript) {
+      setEditableTranscript(recorder.transcript);
+    }
+  }, [recorder.isRecording, recorder.transcript]);
 
   // Auto-start recording if navigated with ?record=1
   useEffect(() => {
@@ -455,16 +463,12 @@ export default function PatientDetailPage() {
                   {recorder.isRecording ? (
                     <>
                       <div className="flex items-center gap-3">
-                        {/* Pulsing red dot */}
                         <span className="relative flex h-2.5 w-2.5">
                           <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
                           <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500" />
                         </span>
                         <span className="text-[11px] font-bold text-red-600 tracking-wide">Recording</span>
-                        <span
-                          className="text-[11px] font-mono font-bold"
-                          style={{ color: "var(--color-on-surface-variant)" }}
-                        >
+                        <span className="text-[11px] font-mono font-bold" style={{ color: "var(--color-on-surface-variant)" }}>
                           {formatDuration(recorder.duration)}
                         </span>
                       </div>
@@ -480,20 +484,12 @@ export default function PatientDetailPage() {
                   ) : (
                     <>
                       <div className="flex items-center gap-3">
-                        <span className="material-symbols-outlined text-sm" style={{ color: "var(--color-primary)" }}>
-                          check_circle
-                        </span>
+                        <span className="material-symbols-outlined text-sm" style={{ color: "var(--color-primary)" }}>check_circle</span>
                         <span className="text-[11px] font-bold" style={{ color: "var(--color-primary)" }}>
                           Recording saved — {formatDuration(recorder.duration)}
                         </span>
                       </div>
                       <div className="flex items-center gap-2">
-                        <audio
-                          src={recorder.audioUrl ?? undefined}
-                          controls
-                          className="h-7"
-                          style={{ minWidth: "160px" }}
-                        />
                         <button
                           onClick={handleTranscribe}
                           disabled={
@@ -503,7 +499,6 @@ export default function PatientDetailPage() {
                           }
                           className="flex items-center gap-1.5 px-3 py-1 rounded text-[10px] font-bold text-white transition-all active:scale-95 disabled:opacity-50"
                           style={{ backgroundColor: "var(--color-primary)" }}
-                          title="Transcribe & analyze with MedASR + MedGemma"
                         >
                           <span className="material-symbols-outlined text-sm">auto_awesome</span>
                           {transcribeState.status === "uploading"
@@ -512,13 +507,10 @@ export default function PatientDetailPage() {
                               ? "Transcribing…"
                               : transcribeState.status === "analyzing"
                                 ? "Analyzing…"
-                                : "Transcribe & Analyze"}
+                                : "Analyze"}
                         </button>
                         <button
-                          onClick={() => {
-                            recorder.clear();
-                            setTranscribeState({ status: "idle" });
-                          }}
+                          onClick={() => { recorder.clear(); setEditableTranscript(""); setTranscribeState({ status: "idle" }); }}
                           className="p-1 rounded hover:bg-slate-100 transition-colors"
                           title="Discard recording"
                           style={{ color: "var(--color-on-surface-variant)" }}
@@ -528,6 +520,57 @@ export default function PatientDetailPage() {
                       </div>
                     </>
                   )}
+                </div>
+              )}
+
+              {/* Live transcript preview — while recording */}
+              {recorder.isRecording && (
+                <div
+                  className="hidden md:block px-6 py-3 shrink-0"
+                  style={{ borderBottom: "1px solid rgba(191,200,204,0.2)", backgroundColor: "rgba(220,38,38,0.03)" }}
+                >
+                  <p className="text-[9px] font-bold uppercase tracking-widest mb-1.5" style={{ color: "#dc2626" }}>
+                    Live Transcript
+                  </p>
+                  <p className="text-[12px] leading-relaxed min-h-[1.5rem]" style={{ color: "var(--color-on-surface-variant)", fontFamily: "var(--font-body)" }}>
+                    {recorder.liveTranscript || <span className="italic opacity-40">Listening…</span>}
+                  </p>
+                </div>
+              )}
+
+              {/* Editable transcript review — after recording stops, before Analyze */}
+              {!recorder.isRecording && recorder.audioUrl && transcribeState.status === "idle" && (
+                <div
+                  className="hidden md:block px-6 py-4 shrink-0"
+                  style={{ borderBottom: "1px solid rgba(191,200,204,0.2)", backgroundColor: "#fafaf8" }}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <p className="text-[9px] font-bold uppercase tracking-widest" style={{ color: "var(--color-on-surface-variant)" }}>
+                      Transcript — Review &amp; Edit Before Analyzing
+                    </p>
+                    {editableTranscript && (
+                      <button
+                        onClick={() => setEditableTranscript("")}
+                        className="text-[9px] font-medium hover:underline"
+                        style={{ color: "var(--color-outline)" }}
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                  <textarea
+                    value={editableTranscript}
+                    onChange={(e) => setEditableTranscript(e.target.value)}
+                    placeholder="No transcript captured — you can type or paste the rounding discussion here before analyzing."
+                    rows={4}
+                    className="w-full resize-none rounded-md px-3 py-2 text-[12px] leading-relaxed focus:outline-none"
+                    style={{
+                      border: "1px solid rgba(191,200,204,0.5)",
+                      backgroundColor: "white",
+                      color: "var(--color-on-surface)",
+                      fontFamily: "var(--font-body)",
+                    }}
+                  />
                 </div>
               )}
 

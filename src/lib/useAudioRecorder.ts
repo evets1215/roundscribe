@@ -8,6 +8,7 @@ export interface AudioRecorderState {
   audioBlob: Blob | null;
   audioUrl: string | null;
   transcript: string | null;
+  liveTranscript: string; // running text during recording
   error: string | null;
 }
 
@@ -46,6 +47,7 @@ export function useAudioRecorder() {
     audioBlob: null,
     audioUrl: null,
     transcript: null,
+    liveTranscript: "",
     error: null,
   });
 
@@ -92,6 +94,7 @@ export function useAudioRecorder() {
           for (let i = e.results.length - 1; i >= 0; i--) {
             if (e.results[i].isFinal) {
               transcriptRef.current += (transcriptRef.current ? " " : "") + e.results[i][0].transcript;
+              setState((prev) => ({ ...prev, liveTranscript: transcriptRef.current }));
             }
           }
         };
@@ -100,7 +103,7 @@ export function useAudioRecorder() {
         recognitionRef.current = recognition;
       }
 
-      setState({ isRecording: true, duration: 0, audioBlob: null, audioUrl: null, transcript: null, error: null });
+      setState({ isRecording: true, duration: 0, audioBlob: null, audioUrl: null, transcript: null, liveTranscript: "", error: null });
 
       timerRef.current = setInterval(() => {
         setState((prev) => ({ ...prev, duration: prev.duration + 1 }));
@@ -135,7 +138,7 @@ export function useAudioRecorder() {
   const clear = useCallback(() => {
     stop();
     transcriptRef.current = "";
-    setState({ isRecording: false, duration: 0, audioBlob: null, audioUrl: null, transcript: null, error: null });
+    setState({ isRecording: false, duration: 0, audioBlob: null, audioUrl: null, transcript: null, liveTranscript: "", error: null });
   }, [stop]);
 
   return { ...state, start, stop, toggle, clear };
