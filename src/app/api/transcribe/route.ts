@@ -25,7 +25,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { createMedASRAdapter } from "@/lib/medasr";
-import { createMedGemmaAdapter } from "@/lib/medgemma";
+import { generateNote } from "@/lib/claude";
 import { createAudioStorage } from "@/lib/storage-factory";
 import { createDiarizer, renderDiarizedTranscript } from "@/lib/diarizer";
 
@@ -61,6 +61,7 @@ export async function POST(request: Request) {
   }
 
   const patientId = (formData.get("patientId") as string | null) ?? undefined;
+  const previousNote = (formData.get("previousNote") as string | null) ?? undefined;
 
   // If a patientId is provided, verify the current user owns it
   if (patientId) {
@@ -77,7 +78,6 @@ export async function POST(request: Request) {
   // 2. Resolve adapters (fail fast if env vars are missing)
   // -------------------------------------------------------------------------
   let medasr;
-  let medgemma;
 
   try {
     medasr = createMedASRAdapter();
@@ -88,11 +88,9 @@ export async function POST(request: Request) {
     );
   }
 
-  try {
-    medgemma = createMedGemmaAdapter();
-  } catch (err) {
+  if (!process.env.ANTHROPIC_API_KEY?.trim()) {
     return NextResponse.json(
-      { error: `MedGemma adapter: ${(err as Error).message}` },
+      { error: "ANTHROPIC_API_KEY is not set." },
       { status: 503 },
     );
   }
@@ -136,16 +134,16 @@ export async function POST(request: Request) {
   }
 
   // -------------------------------------------------------------------------
-  // 4. (Optional) diarize transcript then analyze with MedGemma
+  // 4. (Optional) diarize transcript then analyze with Claude
   // -------------------------------------------------------------------------
   let note;
   let diarizedTranscript: string | undefined;
   try {
     const diarized = await diarizer.diarize(transcript, { maxSpeakers: 3 });
     diarizedTranscript = renderDiarizedTranscript(diarized.segments);
-    note = await medgemma.analyze(diarizedTranscript, patientId ?? "unknown");
+    note = await generateNote(diarizedTranscript, patientId ?? "unknown", previousNote);
   } catch (err) {
-    console.error("[transcribe] MedGemma/diarizer error:", err);
+    console.error("[transcribe] Claude/diarizer error:", err);
     return NextResponse.json(
       { error: `Analysis failed: ${(err as Error).message}` },
       { status: 500 },
