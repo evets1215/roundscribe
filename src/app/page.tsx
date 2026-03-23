@@ -185,7 +185,7 @@ export default function DashboardPage() {
                 setSearchOpen((v) => !v);
                 if (searchOpen) setSearchQuery("");
               }}
-              className="p-2 rounded-md transition-colors hover:bg-slate-50"
+              className="p-2.5 rounded-md transition-colors hover:bg-slate-50"
               style={{ color: searchOpen ? "var(--color-primary)" : "var(--color-on-surface-variant)" }}
               title="Search patients"
             >
@@ -193,7 +193,7 @@ export default function DashboardPage() {
             </button>
             <button
               onClick={() => setShowCompliance(true)}
-              className="p-2 rounded-md transition-colors hover:bg-slate-50"
+              className="p-2.5 rounded-md transition-colors hover:bg-slate-50"
               style={{ color: "var(--color-on-surface-variant)" }}
               title="Compliance status"
             >
@@ -201,7 +201,7 @@ export default function DashboardPage() {
             </button>
             <button
               onClick={() => setShowAccount(true)}
-              className="p-2 rounded-md transition-colors hover:bg-slate-50"
+              className="p-2.5 rounded-md transition-colors hover:bg-slate-50"
               style={{ color: "var(--color-on-surface-variant)" }}
               title="Account"
             >
@@ -209,7 +209,7 @@ export default function DashboardPage() {
             </button>
             <button
               onClick={() => setShowSignout(true)}
-              className="p-2 rounded-md transition-colors hover:bg-slate-50"
+              className="p-2.5 rounded-md transition-colors hover:bg-slate-50"
               style={{ color: "var(--color-on-surface-variant)" }}
               title="Log out"
             >
@@ -534,7 +534,7 @@ export default function DashboardPage() {
                           </button>
                           <Link
                             href={`/patients/${patient.id}`}
-                            className="font-bold text-[11px] hover:underline uppercase tracking-wider w-16 text-right"
+                            className="font-bold text-[11px] hover:underline uppercase tracking-wider w-16 text-right min-h-[44px] flex items-center justify-end"
                             style={{
                               color:
                                 patient.status === "Updated"
