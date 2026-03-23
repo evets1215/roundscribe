@@ -8,15 +8,13 @@ import AppSidebar from "@/components/AppSidebar";
 import StatusBadge from "@/components/StatusBadge";
 import { patients as initialPatients, type Patient } from "@/lib/data";
 
-type SortKey = "status" | "mrn" | "dob" | "sex";
+type SortKey = "status" | "mrn";
 
 const TOTAL_PATIENTS = 12;
 
 const sortableColumns: { label: string; key: SortKey }[] = [
   { label: "Status", key: "status" },
   { label: "MRN", key: "mrn" },
-  { label: "DOB", key: "dob" },
-  { label: "Sex", key: "sex" },
 ];
 
 const SEX_OPTIONS: { label: string; value: "M" | "F" }[] = [
@@ -319,7 +317,7 @@ export default function DashboardPage() {
                         className="mt-1 text-[11px]"
                         style={{ color: "var(--color-on-surface-variant)" }}
                       >
-                        MRN {patient.mrn} · {patient.dob} · {patient.sex}
+                        MRN {patient.mrn}
                       </div>
                     </div>
 
@@ -512,22 +510,6 @@ export default function DashboardPage() {
                         style={{ color: "var(--color-on-surface-variant)" }}
                       >
                         {patient.mrn}
-                      </td>
-
-                      {/* DOB */}
-                      <td
-                        className="px-4 py-3 text-xs"
-                        style={{ color: "var(--color-on-surface-variant)" }}
-                      >
-                        {patient.dob}
-                      </td>
-
-                      {/* Sex */}
-                      <td
-                        className="px-4 py-3 text-xs"
-                        style={{ color: "var(--color-on-surface-variant)" }}
-                      >
-                        {patient.sex}
                       </td>
 
                       {/* Action */}
