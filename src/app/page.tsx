@@ -114,10 +114,6 @@ export default function DashboardPage() {
   });
 
   const handleAddPatient = () => {
-    if (!newPatient.name.trim()) { setAddError("Name is required."); return; }
-    if (!newPatient.room.trim()) { setAddError("Room is required."); return; }
-    if (!newPatient.mrn.trim()) { setAddError("MRN is required."); return; }
-    if (!/^\d+$/.test(newPatient.mrn.trim())) { setAddError("MRN must be numeric."); return; }
     setAddError("");
 
     const created: Patient = {
@@ -648,7 +644,7 @@ export default function DashboardPage() {
               {/* Name */}
               <div>
                 <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
-                  Full Name <span style={{ color: "var(--color-error)" }}>*</span>
+                  Full Name
                 </label>
                 <input
                   type="text"
@@ -664,7 +660,7 @@ export default function DashboardPage() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
-                    Room <span style={{ color: "var(--color-error)" }}>*</span>
+                    Room
                   </label>
                   <input
                     type="text"
@@ -677,7 +673,7 @@ export default function DashboardPage() {
                 </div>
                 <div>
                   <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
-                    MRN <span style={{ color: "var(--color-error)" }}>*</span>
+                    MRN
                   </label>
                   <input
                     type="text"
@@ -690,43 +686,6 @@ export default function DashboardPage() {
                 </div>
               </div>
 
-              {/* DOB + Sex */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
-                    Date of Birth
-                  </label>
-                  <input
-                    type="date"
-                    value={newPatient.dob}
-                    onChange={(e) => setNewPatient((p) => ({ ...p, dob: e.target.value }))}
-                    className="w-full px-3 py-2 text-sm rounded-lg border focus:outline-none focus:ring-2"
-                    style={{ borderColor: "var(--color-outline-variant)", fontFamily: "var(--font-body)" }}
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
-                    Sex
-                  </label>
-                  <div className="flex gap-2 pt-1">
-                    {SEX_OPTIONS.map(({ label, value }) => (
-                      <button
-                        key={value}
-                        type="button"
-                        onClick={() => setNewPatient((p) => ({ ...p, sex: value }))}
-                        className="flex-1 py-2 rounded-lg text-xs font-bold border transition-all"
-                        style={
-                          newPatient.sex === value
-                            ? { backgroundColor: "var(--color-primary)", color: "white", borderColor: "var(--color-primary)" }
-                            : { backgroundColor: "white", color: "var(--color-on-surface-variant)", borderColor: "var(--color-outline-variant)" }
-                        }
-                      >
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
 
               {/* Validation error */}
               {addError && (
