@@ -271,7 +271,7 @@ export default function DashboardPage() {
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setShowAddPatient(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-bold text-white shadow-sm hover:opacity-90 transition-all active:scale-95"
+                className="flex items-center gap-1.5 px-4 py-2.5 rounded text-xs font-bold text-white shadow-sm hover:opacity-90 transition-all active:scale-95"
                 style={{ backgroundColor: "var(--color-primary)" }}
               >
                 <span className="material-symbols-outlined text-base">add</span>
@@ -415,7 +415,7 @@ export default function DashboardPage() {
                       >
                         <button
                           onClick={() => handleSort(key)}
-                          className="flex items-center gap-1 uppercase transition-colors hover:opacity-70"
+                          className="flex items-center gap-1 uppercase transition-colors hover:opacity-70 min-h-[44px] py-2"
                         >
                           {label}
                           <span
@@ -452,7 +452,7 @@ export default function DashboardPage() {
                       <td className="px-4 py-3 text-center">
                         <button
                           onClick={() => togglePin(patient.id)}
-                          className="transition-transform hover:scale-110"
+                          className="transition-transform hover:scale-110 min-w-[44px] min-h-[44px] flex items-center justify-center"
                           title={patient.pinned ? "Unpin patient" : "Pin patient"}
                           style={{
                             color: patient.pinned
@@ -517,7 +517,7 @@ export default function DashboardPage() {
                         <div className="flex items-center justify-end gap-2">
                           <button
                             onClick={() => router.push(`/patients/${patient.id}?record=1`)}
-                            className="p-1.5 rounded-full transition-colors hover:bg-slate-100"
+                            className="p-2.5 rounded-full transition-colors hover:bg-slate-100 min-w-[44px] min-h-[44px] flex items-center justify-center"
                             title="Start Recording"
                             style={{ color: "var(--color-primary)" }}
                           >
