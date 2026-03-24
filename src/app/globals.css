@@ -110,6 +110,13 @@
 ::-webkit-scrollbar-thumb { background: #bfc8cc; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #6f797c; }
 
+/* contentEditable placeholder via data-placeholder */
+.prior-editor:empty::before {
+  content: attr(data-placeholder);
+  color: #94a3b8;
+  pointer-events: none;
+}
+
 body {
   background-color: var(--color-surface);
   color: var(--color-on-surface);

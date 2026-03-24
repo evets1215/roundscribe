@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: roundscribe-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: roundscribe
+      POSTGRES_PASSWORD: roundscribe
+      POSTGRES_DB: roundscribe
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U roundscribe"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:

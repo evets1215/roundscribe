@@ -82,20 +82,14 @@ export default function AppSidebar() {
         </div>
 
         <div className="flex flex-col gap-2">
-          <a
-            href="#"
-            className="flex items-center gap-2 text-xs text-slate-500 hover:text-slate-700 font-medium"
-          >
+          <span className="flex items-center gap-2 text-xs text-slate-500 font-medium">
             <span className="material-symbols-outlined text-sm">help</span>
             <span>Support</span>
-          </a>
-          <a
-            href="#"
-            className="flex items-center gap-2 text-xs text-slate-500 hover:text-slate-700 font-medium"
-          >
+          </span>
+          <span className="flex items-center gap-2 text-xs text-slate-500 font-medium">
             <span className="material-symbols-outlined text-sm">info</span>
             <span>Help</span>
-          </a>
+          </span>
         </div>
       </div>
     </aside>
