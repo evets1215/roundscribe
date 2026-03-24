@@ -25,7 +25,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/auth";
 import { prisma } from "@/lib/prisma";
 import { createMedASRAdapter } from "@/lib/medasr";
-import { createMedGemmaAdapter } from "@/lib/medgemma";
+import { generateNote } from "@/lib/claude";
 import { createAudioStorage } from "@/lib/storage-factory";
 import { createDiarizer, renderDiarizedTranscript } from "@/lib/diarizer";
 
@@ -37,10 +37,12 @@ export async function POST(request: Request) {
   // 0. Auth check
   // -------------------------------------------------------------------------
   const session = await auth();
-  if (!session?.user?.id) {
+  const userId =
+    session?.user?.id ??
+    (process.env.NODE_ENV === "development" ? "dev-user" : null);
+  if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const userId = session.user.id;
 
   // -------------------------------------------------------------------------
   // 1. Parse multipart form data
@@ -61,9 +63,14 @@ export async function POST(request: Request) {
   }
 
   const patientId = (formData.get("patientId") as string | null) ?? undefined;
+  const previousNote = (formData.get("previousNote") as string | null) ?? undefined;
+  // Browser speech recognition transcript — if present, skip MedASR entirely
+  const browserTranscript = (formData.get("transcript") as string | null) ?? undefined;
 
-  // If a patientId is provided, verify the current user owns it
-  if (patientId) {
+  const isDev = process.env.NODE_ENV === "development";
+
+  // If a patientId is provided, verify the current user owns it (skip in dev)
+  if (patientId && !isDev) {
     const patient = await prisma.patient.findFirst({ where: { id: patientId, userId } });
     if (!patient) {
       return NextResponse.json({ error: "Patient not found" }, { status: 404 });
@@ -77,7 +84,6 @@ export async function POST(request: Request) {
   // 2. Resolve adapters (fail fast if env vars are missing)
   // -------------------------------------------------------------------------
   let medasr;
-  let medgemma;
 
   try {
     medasr = createMedASRAdapter();
@@ -88,64 +94,68 @@ export async function POST(request: Request) {
     );
   }
 
-  try {
-    medgemma = createMedGemmaAdapter();
-  } catch (err) {
+  if (!process.env.ANTHROPIC_API_KEY?.trim()) {
     return NextResponse.json(
-      { error: `MedGemma adapter: ${(err as Error).message}` },
+      { error: "ANTHROPIC_API_KEY is not set." },
       { status: 503 },
     );
   }
 
   // -------------------------------------------------------------------------
-  // 3. Store audio + Transcribe with MedASR
+  // 3. Store audio + Transcribe
+  //    If the browser already sent a transcript, skip MedASR entirely.
   // -------------------------------------------------------------------------
   let transcript: string;
   let audioKey: string | undefined;
   const mimeType = audioFile.type || "audio/webm";
 
-  try {
-    const buffer = Buffer.from(await audioFile.arrayBuffer());
+  if (browserTranscript) {
+    // Use browser speech recognition transcript directly
+    transcript = browserTranscript;
+    console.log("[transcribe] Using browser transcript:", transcript.slice(0, 100));
+  } else {
+    try {
+      const buffer = Buffer.from(await audioFile.arrayBuffer());
 
-    const stored = await storage.putAudio({
-      patientId: patientId ?? "unknown",
-      contentType: mimeType,
-      bytes: new Uint8Array(buffer),
-    });
-    audioKey = stored.key;
-
-    // Persist AudioRecording row if we have a real patient
-    if (patientId) {
-      await prisma.audioRecording.create({
-        data: {
-          patientId,
-          storageKey: audioKey,
-          mimeType,
-          sizeBytes: audioFile.size,
-        },
+      const stored = await storage.putAudio({
+        patientId: patientId ?? "unknown",
+        contentType: mimeType,
+        bytes: new Uint8Array(buffer),
       });
-    }
+      audioKey = stored.key;
 
-    transcript = await medasr.transcribe(buffer, mimeType);
-  } catch (err) {
-    console.error("[transcribe] MedASR/storage error:", err);
-    return NextResponse.json(
-      { error: `Transcription failed: ${(err as Error).message}` },
-      { status: 500 },
-    );
+      if (patientId && !isDev) {
+        await prisma.audioRecording.create({
+          data: {
+            patientId,
+            storageKey: audioKey,
+            mimeType,
+            sizeBytes: audioFile.size,
+          },
+        });
+      }
+
+      transcript = await medasr.transcribe(buffer, mimeType);
+    } catch (err) {
+      console.error("[transcribe] MedASR/storage error:", err);
+      return NextResponse.json(
+        { error: `Transcription failed: ${(err as Error).message}` },
+        { status: 500 },
+      );
+    }
   }
 
   // -------------------------------------------------------------------------
-  // 4. (Optional) diarize transcript then analyze with MedGemma
+  // 4. (Optional) diarize transcript then analyze with Claude
   // -------------------------------------------------------------------------
   let note;
   let diarizedTranscript: string | undefined;
   try {
     const diarized = await diarizer.diarize(transcript, { maxSpeakers: 3 });
     diarizedTranscript = renderDiarizedTranscript(diarized.segments);
-    note = await medgemma.analyze(diarizedTranscript, patientId ?? "unknown");
+    note = await generateNote(diarizedTranscript, patientId ?? "unknown", previousNote);
   } catch (err) {
-    console.error("[transcribe] MedGemma/diarizer error:", err);
+    console.error("[transcribe] Claude/diarizer error:", err);
     return NextResponse.json(
       { error: `Analysis failed: ${(err as Error).message}` },
       { status: 500 },
@@ -156,8 +166,8 @@ export async function POST(request: Request) {
   // 5. Persist Note in DB (and update patient status if applicable)
   // -------------------------------------------------------------------------
   let dbNoteId: string;
-  try {
-    if (patientId) {
+  if (!isDev && patientId) {
+    try {
       const dbNote = await prisma.note.create({
         data: {
           patientId,
@@ -168,7 +178,6 @@ export async function POST(request: Request) {
       });
       dbNoteId = dbNote.id;
 
-      // Update patient status to "In Progress" if still Pending
       await prisma.patient.updateMany({
         where: { id: patientId, status: "Pending" },
         data: { status: "In Progress" },
@@ -182,16 +191,16 @@ export async function POST(request: Request) {
           details: { noteId: dbNote.id, audioKey },
         },
       });
-    } else {
-      // No patient association — generate a transient id
-      dbNoteId = crypto.randomUUID();
+    } catch (err) {
+      console.error("[transcribe] DB persist error:", err);
+      return NextResponse.json(
+        { error: `Failed to persist note: ${(err as Error).message}` },
+        { status: 500 },
+      );
     }
-  } catch (err) {
-    console.error("[transcribe] DB persist error:", err);
-    return NextResponse.json(
-      { error: `Failed to persist note: ${(err as Error).message}` },
-      { status: 500 },
-    );
+  } else {
+    // Dev mode or no patient — generate a transient id, skip DB
+    dbNoteId = crypto.randomUUID();
   }
 
   return NextResponse.json({

@@ -7,7 +7,37 @@ export interface AudioRecorderState {
   duration: number;
   audioBlob: Blob | null;
   audioUrl: string | null;
+  transcript: string | null;
+  liveTranscript: string; // running text during recording
   error: string | null;
+}
+
+// Minimal type shim for the Web Speech API (not in standard TS DOM lib)
+interface SpeechRecognitionEvent extends Event {
+  results: SpeechRecognitionResultList;
+}
+interface SpeechRecognitionInstance extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((e: SpeechRecognitionEvent) => void) | null;
+  onerror: ((e: Event) => void) | null;
+  start(): void;
+  stop(): void;
+}
+declare const webkitSpeechRecognition: new () => SpeechRecognitionInstance;
+declare const SpeechRecognition: new () => SpeechRecognitionInstance;
+
+function createSpeechRecognition(): SpeechRecognitionInstance | null {
+  if (typeof window === "undefined") return null;
+  const Ctor =
+    (window as unknown as Record<string, unknown>).SpeechRecognition as
+      | (new () => SpeechRecognitionInstance)
+      | undefined ??
+    (window as unknown as Record<string, unknown>).webkitSpeechRecognition as
+      | (new () => SpeechRecognitionInstance)
+      | undefined;
+  return Ctor ? new Ctor() : null;
 }
 
 export function useAudioRecorder() {
@@ -16,12 +46,16 @@ export function useAudioRecorder() {
     duration: 0,
     audioBlob: null,
     audioUrl: null,
+    transcript: null,
+    liveTranscript: "",
     error: null,
   });
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+  const transcriptRef = useRef<string>("");
 
   const start = useCallback(async () => {
     try {
@@ -29,6 +63,7 @@ export function useAudioRecorder() {
       const mediaRecorder = new MediaRecorder(stream);
       mediaRecorderRef.current = mediaRecorder;
       chunksRef.current = [];
+      transcriptRef.current = "";
 
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data);
@@ -42,13 +77,33 @@ export function useAudioRecorder() {
           isRecording: false,
           audioBlob: blob,
           audioUrl: url,
+          transcript: transcriptRef.current || null,
         }));
         stream.getTracks().forEach((t) => t.stop());
       };
 
       mediaRecorder.start(100);
 
-      setState({ isRecording: true, duration: 0, audioBlob: null, audioUrl: null, error: null });
+      // Start Web Speech API for real-time transcription
+      const recognition = createSpeechRecognition();
+      if (recognition) {
+        recognition.continuous = true;
+        recognition.interimResults = false;
+        recognition.lang = "en-US";
+        recognition.onresult = (e: SpeechRecognitionEvent) => {
+          for (let i = e.results.length - 1; i >= 0; i--) {
+            if (e.results[i].isFinal) {
+              transcriptRef.current += (transcriptRef.current ? " " : "") + e.results[i][0].transcript;
+              setState((prev) => ({ ...prev, liveTranscript: transcriptRef.current }));
+            }
+          }
+        };
+        recognition.onerror = () => { /* non-fatal — fall back to MedASR */ };
+        recognition.start();
+        recognitionRef.current = recognition;
+      }
+
+      setState({ isRecording: true, duration: 0, audioBlob: null, audioUrl: null, transcript: null, liveTranscript: "", error: null });
 
       timerRef.current = setInterval(() => {
         setState((prev) => ({ ...prev, duration: prev.duration + 1 }));
@@ -65,6 +120,10 @@ export function useAudioRecorder() {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
     }
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      recognitionRef.current = null;
+    }
     if (timerRef.current) {
       clearInterval(timerRef.current);
       timerRef.current = null;
@@ -78,7 +137,8 @@ export function useAudioRecorder() {
 
   const clear = useCallback(() => {
     stop();
-    setState({ isRecording: false, duration: 0, audioBlob: null, audioUrl: null, error: null });
+    transcriptRef.current = "";
+    setState({ isRecording: false, duration: 0, audioBlob: null, audioUrl: null, transcript: null, liveTranscript: "", error: null });
   }, [stop]);
 
   return { ...state, start, stop, toggle, clear };

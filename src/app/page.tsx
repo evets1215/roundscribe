@@ -8,15 +8,17 @@ import AppSidebar from "@/components/AppSidebar";
 import StatusBadge from "@/components/StatusBadge";
 import { patients as initialPatients, type Patient } from "@/lib/data";
 
-type SortKey = "status" | "mrn" | "dob" | "sex";
+function storePatient(patient: Patient) {
+  try { sessionStorage.setItem(`rs-patient-${patient.id}`, JSON.stringify(patient)); } catch {}
+}
+
+type SortKey = "status" | "mrn";
 
 const TOTAL_PATIENTS = 12;
 
 const sortableColumns: { label: string; key: SortKey }[] = [
   { label: "Status", key: "status" },
   { label: "MRN", key: "mrn" },
-  { label: "DOB", key: "dob" },
-  { label: "Sex", key: "sex" },
 ];
 
 interface NewPatientForm {
@@ -175,7 +177,7 @@ export default function DashboardPage() {
                 setSearchOpen((v) => !v);
                 if (searchOpen) setSearchQuery("");
               }}
-              className="p-2 rounded-md transition-colors hover:bg-slate-50"
+              className="p-2.5 rounded-md transition-colors hover:bg-slate-50"
               style={{ color: searchOpen ? "var(--color-primary)" : "var(--color-on-surface-variant)" }}
               title="Search patients"
             >
@@ -183,7 +185,7 @@ export default function DashboardPage() {
             </button>
             <button
               onClick={() => setShowCompliance(true)}
-              className="p-2 rounded-md transition-colors hover:bg-slate-50"
+              className="p-2.5 rounded-md transition-colors hover:bg-slate-50"
               style={{ color: "var(--color-on-surface-variant)" }}
               title="Compliance status"
             >
@@ -191,7 +193,7 @@ export default function DashboardPage() {
             </button>
             <button
               onClick={() => setShowAccount(true)}
-              className="p-2 rounded-md transition-colors hover:bg-slate-50"
+              className="p-2.5 rounded-md transition-colors hover:bg-slate-50"
               style={{ color: "var(--color-on-surface-variant)" }}
               title="Account"
             >
@@ -199,7 +201,7 @@ export default function DashboardPage() {
             </button>
             <button
               onClick={() => setShowSignout(true)}
-              className="p-2 rounded-md transition-colors hover:bg-slate-50"
+              className="p-2.5 rounded-md transition-colors hover:bg-slate-50"
               style={{ color: "var(--color-on-surface-variant)" }}
               title="Log out"
             >
@@ -236,7 +238,7 @@ export default function DashboardPage() {
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setShowAddPatient(true)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-bold text-white shadow-sm hover:opacity-90 transition-all active:scale-95"
+                className="flex items-center gap-1.5 px-4 py-2.5 rounded text-xs font-bold text-white shadow-sm hover:opacity-90 transition-all active:scale-95"
                 style={{ backgroundColor: "var(--color-primary)" }}
               >
                 <span className="material-symbols-outlined text-base">add</span>
@@ -370,7 +372,7 @@ export default function DashboardPage() {
                       >
                         <button
                           onClick={() => handleSort(key)}
-                          className="flex items-center gap-1 uppercase transition-colors hover:opacity-70"
+                          className="flex items-center gap-1 uppercase transition-colors hover:opacity-70 min-h-[44px] py-2"
                         >
                           {label}
                           <span
@@ -408,7 +410,7 @@ export default function DashboardPage() {
                       <td className="px-4 py-3 text-center">
                         <button
                           onClick={() => togglePin(patient.id)}
-                          className="transition-transform hover:scale-110"
+                          className="transition-transform hover:scale-110 min-w-[44px] min-h-[44px] flex items-center justify-center"
                           title={patient.pinned ? "Unpin patient" : "Pin patient"}
                           style={{
                             color: patient.pinned
@@ -431,7 +433,7 @@ export default function DashboardPage() {
 
                       {/* Name + Room */}
                       <td className="px-4 py-3">
-                        <Link href={`/patients/${patient.id}`} className="block">
+                        <Link href={`/patients/${patient.id}`} onClick={() => storePatient(patient)} className="block">
                           <span
                             className="text-xs font-bold block uppercase tracking-wide"
                             style={{ color: "var(--color-primary)" }}
