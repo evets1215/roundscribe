@@ -14,9 +14,25 @@
  * Expected CLI stdout : JSON StructuredNote, OR plain SOAP-formatted text
  */
 
+/** One changed (or unchanged) problem section in a diff note */
+export interface ProblemChange {
+  label: string;
+  changed: boolean;
+  /** Original text from the prior note (line-break separated items) */
+  before: string;
+  /** Updated text after rounds (line-break separated items) */
+  after: string;
+}
+
+export interface NoteSection {
+  changed: boolean;
+  before: string;
+  after: string;
+}
+
 export interface StructuredNote {
   /** Output format produced by the model */
-  format: "SOAP" | "bullets";
+  format: "SOAP" | "bullets" | "problem-diff";
   /** SOAP sections (present when format === "SOAP") */
   subjective?: string;
   objective?: string;
@@ -24,6 +40,10 @@ export interface StructuredNote {
   plan?: string;
   /** Bullet list lines (present when format === "bullets") */
   bullets?: string[];
+  /** Problem-diff sections (present when format === "problem-diff") */
+  problems?: ProblemChange[];
+  subjective_section?: NoteSection;
+  social_section?: NoteSection;
   /** Full raw text returned by the model */
   rawText: string;
 }

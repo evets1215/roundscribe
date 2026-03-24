@@ -58,27 +58,43 @@ Rules:
 function buildUpdatePrompt(previousNote: string): string {
   return `You are a clinical documentation assistant updating an inpatient progress note based on today's team rounding discussion.
 
-The prior note uses a problem-based format with #ProblemName headers under ASSESSMENT & PLAN. Your job is to update only the problems that were explicitly discussed in today's rounding transcript, leaving all other problems unchanged.
+The prior note uses a problem-based format with #ProblemName headers. Your job is to identify what changed and return a structured diff so the physician can review and accept each change.
 
 Prior note:
 ---
 ${previousNote}
 ---
 
-Your output must be a JSON object:
+Your output must be a JSON object with this exact shape:
 {
-  format: "SOAP",
-  rawText: string
+  "format": "problem-diff",
+  "subjective_section": {
+    "changed": boolean,
+    "before": "prior subjective text",
+    "after": "updated subjective text (same as before if not discussed)"
+  },
+  "problems": [
+    {
+      "label": "Problem name (without the # prefix)",
+      "changed": boolean,
+      "before": "prior text for this problem",
+      "after": "updated text — one management item per line, each starting with -"
+    }
+  ],
+  "social_section": {
+    "changed": boolean,
+    "before": "prior social text",
+    "after": "updated social text (same as before if not discussed)"
+  },
+  "rawText": "full updated note as plain text with #Problem headers"
 }
 
-Rules for rawText:
-- Return the COMPLETE updated note as plain text
-- Preserve the EXACT structure and formatting of the prior note (Date, Patient, SUBJECTIVE, ASSESSMENT & PLAN with #Problem headers, SOCIAL)
-- For each #Problem section: if the rounding discussion mentions a change, update that problem's text. If not discussed, copy the prior text exactly.
-- Update today's date at the top
-- SUBJECTIVE: update only if the patient's subjective complaints were discussed
-- SOCIAL: update only if social/discharge was discussed
-- Do NOT add new sections or change the format
+Rules:
+- Include ALL problems from the prior note in the problems array
+- Set changed: true only for problems explicitly discussed in the transcript
+- For changed problems: "after" must have each distinct management item (medication change, imaging order, lab, consult, etc.) on its own line starting with "- "
+- For unchanged problems: "after" is identical to "before"
+- rawText is the complete updated note (used as fallback)
 - Output ONLY valid JSON — no preamble, no markdown fences`;
 }
 
@@ -123,6 +139,17 @@ class ClaudeAdapter implements MedGemmaAdapter {
 
     try {
       const parsed = JSON.parse(cleaned) as StructuredNote;
+      // Build rawText fallback for problem-diff format if missing
+      if (parsed.format === "problem-diff" && !parsed.rawText && parsed.problems) {
+        const lines: string[] = [];
+        if (parsed.subjective_section) lines.push("SUBJECTIVE", parsed.subjective_section.after, "");
+        lines.push("ASSESSMENT & PLAN", "");
+        for (const p of parsed.problems) {
+          lines.push(`#${p.label}`, p.after, "");
+        }
+        if (parsed.social_section) lines.push("SOCIAL", parsed.social_section.after);
+        parsed.rawText = lines.join("\n");
+      }
       return { ...parsed, rawText: parsed.rawText ?? cleaned };
     } catch {
       // Fallback: return as bullets if JSON parse fails

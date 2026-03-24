@@ -8,6 +8,10 @@ import AppSidebar from "@/components/AppSidebar";
 import StatusBadge from "@/components/StatusBadge";
 import { patients as initialPatients, type Patient } from "@/lib/data";
 
+function storePatient(patient: Patient) {
+  try { sessionStorage.setItem(`rs-patient-${patient.id}`, JSON.stringify(patient)); } catch {}
+}
+
 type SortKey = "status" | "mrn";
 
 const TOTAL_PATIENTS = 12;
@@ -349,7 +353,7 @@ export default function DashboardPage() {
 
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => router.push(`/patients/${patient.id}?record=1`)}
+                        onClick={() => { storePatient(patient); router.push(`/patients/${patient.id}?record=1`); }}
                         className="p-2 rounded-md transition-colors hover:bg-slate-100"
                         title="Start Recording"
                         style={{ color: "var(--color-primary)" }}
@@ -357,7 +361,7 @@ export default function DashboardPage() {
                         <span className="material-symbols-outlined">mic</span>
                       </button>
                       <Link
-                        href={`/patients/${patient.id}`}
+                        href={`/patients/${patient.id}`} onClick={() => storePatient(patient)}
                         className="px-3 py-2 rounded-md text-xs font-bold uppercase tracking-wider"
                         style={{
                           backgroundColor: "var(--color-primary)",
@@ -475,7 +479,7 @@ export default function DashboardPage() {
 
                       {/* Name + Room */}
                       <td className="px-4 py-3">
-                        <Link href={`/patients/${patient.id}`} className="block">
+                        <Link href={`/patients/${patient.id}`} onClick={() => storePatient(patient)} className="block">
                           <span
                             className="text-xs font-bold block uppercase tracking-wide"
                             style={{ color: "var(--color-primary)" }}
@@ -516,7 +520,7 @@ export default function DashboardPage() {
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-2">
                           <button
-                            onClick={() => router.push(`/patients/${patient.id}?record=1`)}
+                            onClick={() => { storePatient(patient); router.push(`/patients/${patient.id}?record=1`); }}
                             className="p-2.5 rounded-full transition-colors hover:bg-slate-100 min-w-[44px] min-h-[44px] flex items-center justify-center"
                             title="Start Recording"
                             style={{ color: "var(--color-primary)" }}
@@ -533,7 +537,7 @@ export default function DashboardPage() {
                             </span>
                           </button>
                           <Link
-                            href={`/patients/${patient.id}`}
+                            href={`/patients/${patient.id}`} onClick={() => storePatient(patient)}
                             className="font-bold text-[11px] hover:underline uppercase tracking-wider w-16 text-right min-h-[44px] flex items-center justify-end"
                             style={{
                               color:
