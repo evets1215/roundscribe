@@ -3,7 +3,7 @@
  */
 
 import { NextResponse } from "next/server";
-import { auth } from "@/auth";
+import { getCurrentUserId } from "@/lib/current-user";
 import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
@@ -11,8 +11,8 @@ export const runtime = "nodejs";
 type Params = { params: Promise<{ id: string }> };
 
 export async function GET(_req: Request, { params }: Params) {
-  const session = await auth();
-  if (!session?.user?.id) {
+  const userId = await getCurrentUserId();
+  if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -20,13 +20,14 @@ export async function GET(_req: Request, { params }: Params) {
 
   // Verify ownership
   const patient = await prisma.patient.findFirst({
-    where: { id: patientId, userId: session.user.id },
+    where: { id: patientId, userId },
   });
   if (!patient) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
   const notes = await prisma.note.findMany({
     where: { patientId },
     orderBy: { createdAt: "desc" },
+    take: 1,
     select: {
       id: true,
       patientId: true,

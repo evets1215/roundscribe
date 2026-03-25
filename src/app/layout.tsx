@@ -20,6 +20,11 @@ export const metadata: Metadata = {
   description: "AI-powered clinical rounding for inpatient physicians.",
 };
 
+export const viewport = {
+  width: "device-width",
+  initialScale: 1,
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{

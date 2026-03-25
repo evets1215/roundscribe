@@ -4,7 +4,8 @@ import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { useRouter, useParams } from "next/navigation";
 import AppSidebar from "@/components/AppSidebar";
-import { garyBaileyNote, patients as allPatients, IcdCode, type Patient } from "@/lib/data";
+import { garyBaileyNote, IcdCode, type Patient } from "@/lib/data";
+import { extractRawNoteText } from "@/lib/patient-records";
 import { useAudioRecorder, formatDuration } from "@/lib/useAudioRecorder";
 import type { StructuredNote } from "@/lib/medgemma";
 import DiffNoteView from "@/components/DiffNoteView";
@@ -26,14 +27,15 @@ export default function PatientDetailPage() {
   const isNewPatient = patientId !== "gary-bailey";
   const { patient: gbPatient, yesterday, today, icdCodes: gbIcdCodes } = garyBaileyNote;
 
-  // Read patient metadata saved by the dashboard before navigating here
-  const [sessionPatient] = useState<Patient | null>(() => {
+  // Read patient metadata saved by the dashboard before navigating here.
+  // Falls back to API fetch in a useEffect below if sessionStorage is empty.
+  const [sessionPatient, setSessionPatient] = useState<Patient | null>(() => {
     if (typeof window === "undefined") return null;
     try {
       const raw = sessionStorage.getItem(`rs-patient-${patientId}`);
       if (raw) return JSON.parse(raw) as Patient;
     } catch {}
-    return allPatients.find((p) => p.id === patientId) ?? null;
+    return null;
   });
 
   // Unified display values (either from the session patient or gary bailey)
@@ -101,6 +103,15 @@ export default function PatientDetailPage() {
 
     setTranscribeState({ status: "done", ...result });
 
+    // Auto-advance: update prior editor with the newly generated note so the next
+    // dictation session uses the freshest note as context (all formats, not just non-diff).
+    const advancedText = extractRawNoteText(result.note);
+    if (advancedText && priorEditorRef.current) {
+      isAutoLoading.current = true;
+      priorEditorRef.current.innerText = advancedText;
+      isAutoLoading.current = false;
+    }
+
     // Only update the plain editor for non-diff formats (diff view manages its own display)
     if (result.note.format !== "problem-diff") {
       const editor = editorRef.current;
@@ -144,14 +155,120 @@ export default function PatientDetailPage() {
   };
 
   const priorEditorRef = useRef<HTMLDivElement>(null);
+  // Prevents blur/visibilitychange handlers from saving when we programmatically
+  // set innerText (auto-load on mount, auto-advance after generation).
+  const isAutoLoading = useRef(false);
+  const [priorSaveError, setPriorSaveError] = useState(false);
 
-  // Populate prior editor once on mount with the initial previousNote value.
-  // After that, the editor is fully uncontrolled — React never touches its innerHTML.
+  // Populate prior editor on mount.
+  // Gary Bailey demo: use static data. New patients: fetch latest note from DB.
   useEffect(() => {
     const el = priorEditorRef.current;
-    if (el && previousNote) {
-      el.innerHTML = previousNote.replace(/\n/g, "<br/>");
+
+    if (!isNewPatient) {
+      // Gary Bailey demo — populate from static data
+      if (el && previousNote) {
+        isAutoLoading.current = true;
+        el.innerHTML = previousNote.replace(/\n/g, "<br/>");
+        isAutoLoading.current = false;
+      }
+      return;
     }
+
+    // New patient: load prior note from DB (newest note's rawText)
+    // Disable editor during fetch to prevent race with user edits.
+    if (el) el.contentEditable = "false";
+
+    fetch(`/api/patients/${patientId}/notes`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((notes: Array<{ noteJson: unknown }>) => {
+        const rawText = extractRawNoteText(notes[0]?.noteJson);
+        if (rawText && priorEditorRef.current) {
+          isAutoLoading.current = true;
+          priorEditorRef.current.innerText = rawText;
+          isAutoLoading.current = false;
+        }
+      })
+      .catch(() => {
+        // Fetch failed — editor stays empty, doctor can paste manually
+      })
+      .finally(() => {
+        if (priorEditorRef.current) priorEditorRef.current.contentEditable = "true";
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once on mount only
+
+  // Patient metadata API fallback: if sessionStorage was empty (direct URL / refresh),
+  // fetch from the API and hydrate the header.
+  useEffect(() => {
+    if (sessionPatient || !isNewPatient) return;
+    fetch(`/api/patients/${patientId}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((patient: Patient) => setSessionPatient(patient))
+      .catch(() => {
+        // Patient not found — header shows "New Patient"
+      });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // run once on mount only
+
+  // Paste persistence: save prior editor content to DB on blur, visibility change,
+  // and before unload — so Day-1 paste work survives browser close before first generation.
+  useEffect(() => {
+    if (!isNewPatient) return;
+
+    const doSave = (rawText: string, keepalive = false) => {
+      if (!rawText.trim() || isAutoLoading.current) return;
+      fetch(`/api/patients/${patientId}/prior-note`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rawText }),
+        keepalive,
+      })
+        .then(() => setPriorSaveError(false))
+        .catch(() => {
+          setPriorSaveError(true);
+          setTimeout(() => setPriorSaveError(false), 4000);
+        });
+    };
+
+    const handleBlur = () => doSave(priorEditorRef.current?.innerText ?? "");
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") {
+        const rawText = priorEditorRef.current?.innerText ?? "";
+        if (rawText.trim() && !isAutoLoading.current) {
+          fetch(`/api/patients/${patientId}/prior-note`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ rawText }),
+            keepalive: true,
+          }).catch(() => {
+            console.warn("[roundscribe] visibilitychange prior-note save failed");
+          });
+        }
+      }
+    };
+
+    const handleBeforeUnload = () => {
+      const rawText = priorEditorRef.current?.innerText ?? "";
+      if (rawText.trim() && !isAutoLoading.current) {
+        navigator.sendBeacon(
+          `/api/patients/${patientId}/prior-note`,
+          new Blob([JSON.stringify({ rawText })], { type: "application/json" })
+        );
+      }
+    };
+
+    const el = priorEditorRef.current;
+    el?.addEventListener("blur", handleBlur);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("beforeunload", handleBeforeUnload);
+
+    return () => {
+      el?.removeEventListener("blur", handleBlur);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("beforeunload", handleBeforeUnload);
+    };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // run once on mount only
 
@@ -431,8 +548,11 @@ export default function PatientDetailPage() {
                 style={{ fontFamily: "var(--font-body)", color: "rgba(63,72,76,0.8)", backgroundColor: "transparent" }}
                 contentEditable
                 suppressContentEditableWarning
-                data-placeholder={isNewPatient ? "Paste or type prior note from EHR…" : "Paste the patient's prior note from Epic or Cerner here…"}
+                data-placeholder="Paste yesterday's note here to get started"
               />
+              {priorSaveError && (
+                <p className="px-5 pb-2 text-xs text-red-600">Couldn&apos;t save — check connection</p>
+              )}
             </div>
 
             {/* Column 2: Updated Note (Generated / Editor) */}
