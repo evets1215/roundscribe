@@ -21,10 +21,17 @@ const sortableColumns: { label: string; key: SortKey }[] = [
   { label: "MRN", key: "mrn" },
 ];
 
+const SEX_OPTIONS: { label: string; value: "M" | "F" }[] = [
+  { label: "Male", value: "M" },
+  { label: "Female", value: "F" },
+];
+
 interface NewPatientForm {
   name: string;
   room: string;
   mrn: string;
+  dob: string;
+  sex: "M" | "F";
 }
 
 function Modal({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
@@ -41,7 +48,7 @@ function Modal({ onClose, children }: { onClose: () => void; children: React.Rea
       ref={backdropRef}
       className="fixed inset-0 z-50 flex items-center justify-center"
       style={{ backgroundColor: "rgba(0,0,0,0.35)" }}
-      onMouseDown={(e) => { if (e.target === backdropRef.current) onClose(); }}
+      onClick={(e) => { if (e.target === backdropRef.current) onClose(); }}
     >
       {children}
     </div>
@@ -50,7 +57,13 @@ function Modal({ onClose, children }: { onClose: () => void; children: React.Rea
 
 export default function DashboardPage() {
   const router = useRouter();
-  const [patients, setPatients] = useState<Patient[]>(initialPatients);
+  const [patients, setPatients] = useState<Patient[]>(() => {
+    try {
+      const saved = localStorage.getItem("rs-patient-list");
+      if (saved) return JSON.parse(saved) as Patient[];
+    } catch {}
+    return initialPatients;
+  });
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -63,8 +76,18 @@ export default function DashboardPage() {
 
   // Add patient form state
   const [newPatient, setNewPatient] = useState<NewPatientForm>({
-    name: "", room: "", mrn: "",
+    name: "", room: "", mrn: "", dob: "", sex: "M",
   });
+  const [addError, setAddError] = useState("");
+
+  // Photo scan state
+  type ScanState = "idle" | "scanning" | "review";
+  const [addTab, setAddTab] = useState<"manual" | "scan">("manual");
+  const [scanState, setScanState] = useState<ScanState>("idle");
+  const [scanError, setScanError] = useState("");
+  const [scannedPatients, setScannedPatients] = useState<Array<{ name: string; mrn: string; location: string }>>([]);
+  const scanInputRef = useRef<HTMLInputElement>(null);
+
 
   const roundedPatients = patients.filter((p) => p.status === "Updated").length;
 
@@ -74,6 +97,15 @@ export default function DashboardPage() {
     const newPinned = !patient.pinned;
     setPatients((prev) => prev.map((p) => (p.id === id ? { ...p, pinned: newPinned } : p)));
   };
+
+  const deletePatient = (id: string) => {
+    setPatients((prev) => prev.filter((p) => p.id !== id));
+  };
+
+  // Persist patient list across refreshes
+  useEffect(() => {
+    try { localStorage.setItem("rs-patient-list", JSON.stringify(patients)); } catch {}
+  }, [patients]);
 
   const handleSort = (key: SortKey) => {
     setSort((prev) => {
@@ -107,26 +139,72 @@ export default function DashboardPage() {
   });
 
   const handleAddPatient = () => {
+    setAddError("");
+
     const created: Patient = {
       id: `local-${Date.now()}`,
-      name: newPatient.name.trim() || "New Patient",
-      room: newPatient.room.trim().toUpperCase() || "—",
-      mrn: newPatient.mrn.trim() || "—",
-      dob: "",
-      sex: "M",
+      name: newPatient.name.trim(),
+      room: newPatient.room.trim().toUpperCase(),
+      mrn: newPatient.mrn.trim(),
+      dob: newPatient.dob || "",
+      sex: newPatient.sex,
       status: "Pending",
       lastNote: "Not started",
       pinned: false,
     };
 
     setPatients((prev) => [created, ...prev]);
-    setNewPatient({ name: "", room: "", mrn: "" });
+    setNewPatient({ name: "", room: "", mrn: "", dob: "", sex: "M" });
     setShowAddPatient(false);
   };
 
   const resetAddForm = () => {
-    setNewPatient({ name: "", room: "", mrn: "" });
+    setNewPatient({ name: "", room: "", mrn: "", dob: "", sex: "M" });
+    setAddError("");
+    setAddTab("manual");
+    setScanState("idle");
+    setScanError("");
+    setScannedPatients([]);
     setShowAddPatient(false);
+  };
+
+  const handleScanImage = async (file: File) => {
+    setScanState("scanning");
+    setScanError("");
+    const form = new FormData();
+    form.append("image", file);
+    try {
+      const res = await fetch("/api/scan-patients", { method: "POST", body: form });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Scan failed");
+      if (data.patients.length === 0) {
+        setScanError("No patients found in the photo. Try a clearer image.");
+        setScanState("idle");
+        return;
+      }
+      setScannedPatients(data.patients);
+      setScanState("review");
+    } catch (err) {
+      setScanError((err as Error).message);
+      setScanState("idle");
+    }
+  };
+
+  const handleAddAllScanned = () => {
+    const now = Date.now();
+    const created: Patient[] = scannedPatients.map((p, i) => ({
+      id: `local-${now}-${i}`,
+      name: p.name,
+      room: p.location,
+      mrn: p.mrn,
+      dob: "",
+      sex: "M" as const,
+      status: "Pending" as const,
+      lastNote: "Not started",
+      pinned: false,
+    }));
+    setPatients((prev) => [...created, ...prev]);
+    resetAddForm();
   };
 
   return (
@@ -213,25 +291,50 @@ export default function DashboardPage() {
         {/* Content area */}
         <div className="px-6 py-6 max-w-7xl mx-auto w-full flex-1">
           {/* Page title + stats */}
-          <div className="flex flex-col gap-4 mb-6">
-            <div className="flex items-end justify-between gap-4">
-              <div>
-                <h1
-                  className="text-[28px] md:text-2xl font-extrabold tracking-tight uppercase"
-                  style={{
-                    fontFamily: "var(--font-headline)",
-                    color: "var(--color-on-surface)",
-                    letterSpacing: "0.02em",
-                  }}
-                >
-                  Current Rounding List
-                </h1>
-              </div>
-              <div
-                className="text-base md:text-sm font-semibold shrink-0"
-                style={{ color: "var(--color-on-surface-variant)" }}
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 mb-6">
+            <div>
+              <h1
+                className="text-2xl font-extrabold tracking-tight"
+                style={{
+                  fontFamily: "var(--font-headline)",
+                  color: "var(--color-on-surface)",
+                }}
               >
-                {patients.length} Patients
+                Active Patients
+              </h1>
+              <div className="flex items-center gap-4 mt-1">
+                <p
+                  className="text-xs font-medium"
+                  style={{ color: "var(--color-on-surface-variant)" }}
+                >
+                  {TOTAL_PATIENTS} Patients assigned
+                </p>
+                <div
+                  className="h-3 w-px"
+                  style={{ backgroundColor: "var(--color-outline-variant)" }}
+                />
+                <div className="flex items-center gap-2">
+                  <span
+                    className="text-xs font-bold"
+                    style={{ color: "var(--color-primary)" }}
+                  >
+                    Progress: {roundedPatients}/{TOTAL_PATIENTS}
+                  </span>
+                  <div
+                    className="w-24 h-1.5 rounded-full overflow-hidden"
+                    style={{
+                      backgroundColor: "var(--color-surface-container-highest)",
+                    }}
+                  >
+                    <div
+                      className="h-full rounded-full"
+                      style={{
+                        backgroundColor: "var(--color-primary)",
+                        width: `${(roundedPatients / TOTAL_PATIENTS) * 100}%`,
+                      }}
+                    />
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -256,84 +359,104 @@ export default function DashboardPage() {
             }}
           >
             {/* Mobile: card list */}
-            <div className="md:hidden space-y-4">
-              {sortedPatients.map((patient) => {
-                const statusColor =
-                  patient.status === "Updated"
-                    ? "#67d7e5"
-                    : patient.status === "In Progress"
-                      ? "#f5bf3b"
-                      : "#c9d1d6";
-
-                return (
-                  <div
-                    key={patient.id}
-                    onClick={() => router.push(`/patients/${patient.id}`)}
-                    className="rounded-[28px] px-5 py-6 cursor-pointer shadow-sm"
-                    style={{
-                      backgroundColor: "#ffffff",
-                      border: "1px solid #eef2f4",
-                      boxShadow: "0 2px 10px rgba(15,23,42,0.04)",
-                    }}
-                  >
-                    <div className="flex items-center justify-between gap-4">
-                      <div className="flex items-center gap-4 min-w-0 flex-1">
-                        <div
-                          className="w-16 h-16 rounded-2xl flex items-center justify-center shrink-0 text-[18px] font-bold"
-                          style={{
-                            backgroundColor: "#edf4f7",
-                            color: "#0d5966",
-                          }}
-                        >
-                          {patient.room.replace(/[^0-9A-Z]/g, "") || "—"}
-                        </div>
-
-                        <div className="min-w-0 flex-1">
-                          <div
-                            className="text-[20px] leading-tight font-semibold truncate"
-                            style={{ color: "#101418" }}
-                          >
-                            {patient.name}
-                          </div>
-                          <div className="mt-2 flex items-center gap-2">
-                            <span
-                              className="w-2.5 h-2.5 rounded-full shrink-0"
-                              style={{ backgroundColor: statusColor }}
-                            />
-                            <span
-                              className="text-[12px] font-medium uppercase tracking-[0.12em]"
-                              style={{ color: "#7b8790" }}
-                            >
-                              {patient.status}
-                            </span>
-                          </div>
-                        </div>
+            <div className="md:hidden p-3 space-y-3">
+              {sortedPatients.map((patient) => (
+                <div
+                  key={patient.id}
+                  className="rounded-lg p-4"
+                  style={{
+                    backgroundColor: "var(--color-surface)",
+                    border: "1px solid var(--color-outline-variant)",
+                  }}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div
+                        className="text-[11px] font-bold uppercase tracking-wide"
+                        style={{ color: "var(--color-primary)" }}
+                      >
+                        {patient.room}
                       </div>
-
-                      <div className="flex items-center gap-2 shrink-0">
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            router.push(`/patients/${patient.id}?record=1`);
-                          }}
-                          className="w-11 h-11 rounded-full flex items-center justify-center transition-colors"
-                          title="Start Recording"
-                          style={{ color: "#0d5966" }}
-                        >
-                          <span className="material-symbols-outlined text-[30px]">mic</span>
-                        </button>
+                      <div
+                        className="text-base font-extrabold truncate"
+                        style={{ color: "var(--color-on-surface)" }}
+                      >
+                        {patient.name}
+                      </div>
+                      <div
+                        className="mt-1 text-[11px]"
+                        style={{ color: "var(--color-on-surface-variant)" }}
+                      >
+                        MRN {patient.mrn}
                       </div>
                     </div>
+
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        onClick={() => togglePin(patient.id)}
+                        className="p-2 rounded-md"
+                        title={patient.pinned ? "Unpin patient" : "Pin patient"}
+                        style={{ color: patient.pinned ? "var(--color-primary)" : "#cbd5e1" }}
+                      >
+                        <span
+                          className="material-symbols-outlined"
+                          style={patient.pinned ? { fontVariationSettings: "'FILL' 1" } : {}}
+                        >
+                          push_pin
+                        </span>
+                      </button>
+                      <button
+                        onClick={() => deletePatient(patient.id)}
+                        className="p-2 rounded-md transition-colors hover:bg-red-50"
+                        title="Remove patient"
+                        style={{ color: "#cbd5e1" }}
+                      >
+                        <span className="material-symbols-outlined">delete</span>
+                      </button>
+                    </div>
                   </div>
-                );
-              })}
+
+                  <div className="mt-3 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <StatusBadge status={patient.status} />
+                      <span
+                        className="text-[11px] font-medium"
+                        style={{ color: "var(--color-on-surface-variant)" }}
+                      >
+                        Last: {patient.lastNote}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => { storePatient(patient); router.push(`/patients/${patient.id}?record=1`); }}
+                        className="p-2 rounded-md transition-colors hover:bg-slate-100"
+                        title="Start Recording"
+                        style={{ color: "var(--color-primary)" }}
+                      >
+                        <span className="material-symbols-outlined">mic</span>
+                      </button>
+                      <Link
+                        href={`/patients/${patient.id}`} onClick={() => storePatient(patient)}
+                        className="px-3 py-2 rounded-md text-xs font-bold uppercase tracking-wider"
+                        style={{
+                          backgroundColor: "var(--color-primary)",
+                          color: "white",
+                        }}
+                      >
+                        Open
+                      </Link>
+                    </div>
+                  </div>
+                </div>
+              ))}
 
               {sortedPatients.length === 0 && (
                 <div
-                  className="rounded-[28px] p-6 text-center text-sm"
+                  className="rounded-lg p-6 text-center text-sm"
                   style={{
-                    backgroundColor: "#ffffff",
-                    border: "1px solid #eef2f4",
+                    backgroundColor: "var(--color-surface)",
+                    border: "1px solid var(--color-outline-variant)",
                     color: "var(--color-on-surface-variant)",
                   }}
                 >
@@ -392,7 +515,7 @@ export default function DashboardPage() {
                       className="px-4 py-2.5 text-[11px] font-bold uppercase tracking-wider text-right"
                       style={{ color: "var(--color-on-surface-variant)" }}
                     >
-                      Record
+                      Action
                     </th>
                   </tr>
                 </thead>
@@ -400,8 +523,7 @@ export default function DashboardPage() {
                   {sortedPatients.map((patient) => (
                     <tr
                       key={patient.id}
-                      onClick={() => router.push(`/patients/${patient.id}`)}
-                      className="group transition-colors hover:bg-slate-50/50 cursor-pointer"
+                      className="group transition-colors hover:bg-slate-50/50"
                       style={{
                         borderBottom: "1px solid var(--color-outline-variant)",
                       }}
@@ -470,31 +592,12 @@ export default function DashboardPage() {
                         {patient.mrn}
                       </td>
 
-                      {/* DOB */}
-                      <td
-                        className="px-4 py-3 text-xs"
-                        style={{ color: "var(--color-on-surface-variant)" }}
-                      >
-                        {patient.dob}
-                      </td>
-
-                      {/* Sex */}
-                      <td
-                        className="px-4 py-3 text-xs"
-                        style={{ color: "var(--color-on-surface-variant)" }}
-                      >
-                        {patient.sex}
-                      </td>
-
-                      {/* Record */}
+                      {/* Action */}
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-2">
                           <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              router.push(`/patients/${patient.id}?record=1`);
-                            }}
-                            className="p-1.5 rounded-full transition-colors hover:bg-slate-100"
+                            onClick={() => { storePatient(patient); router.push(`/patients/${patient.id}?record=1`); }}
+                            className="p-2.5 rounded-full transition-colors hover:bg-slate-100 min-w-[44px] min-h-[44px] flex items-center justify-center"
                             title="Start Recording"
                             style={{ color: "var(--color-primary)" }}
                           >
@@ -508,6 +611,30 @@ export default function DashboardPage() {
                             >
                               mic
                             </span>
+                          </button>
+                          <Link
+                            href={`/patients/${patient.id}`} onClick={() => storePatient(patient)}
+                            className="font-bold text-[11px] hover:underline uppercase tracking-wider w-16 text-right min-h-[44px] flex items-center justify-end"
+                            style={{
+                              color:
+                                patient.status === "Updated"
+                                  ? "var(--color-on-surface-variant)"
+                                  : "var(--color-primary)",
+                            }}
+                          >
+                            {patient.status === "Pending"
+                              ? "Round"
+                              : patient.status === "In Progress"
+                              ? "Resume"
+                              : "View"}
+                          </Link>
+                          <button
+                            onClick={() => deletePatient(patient.id)}
+                            className="p-2.5 rounded-full transition-colors hover:bg-red-50 min-w-[44px] min-h-[44px] flex items-center justify-center"
+                            title="Remove patient"
+                            style={{ color: "#cbd5e1" }}
+                          >
+                            <span className="material-symbols-outlined text-lg">delete</span>
                           </button>
                         </div>
                       </td>
@@ -562,18 +689,13 @@ export default function DashboardPage() {
 
       {/* ── Add Patient Modal ── */}
       {showAddPatient && (
-        <div
-          className="fixed inset-0 z-50"
-          style={{ backgroundColor: "rgba(0,0,0,0.35)" }}
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) resetAddForm();
-          }}
-        >
+        <Modal onClose={resetAddForm}>
           <div
-            className="w-full max-w-md mx-0 md:mx-auto rounded-t-2xl md:rounded-xl shadow-xl p-5 md:p-6 fixed bottom-0 left-0 right-0 md:top-1/2 md:bottom-auto md:-translate-y-1/2 max-h-[88vh] overflow-y-auto"
+            className="w-full max-w-md mx-0 md:mx-4 rounded-t-2xl md:rounded-xl shadow-xl p-5 md:p-6 fixed bottom-0 left-0 right-0 md:static max-h-[88vh] overflow-y-auto"
             style={{ backgroundColor: "white" }}
           >
-            <div className="flex items-center justify-between mb-5">
+            {/* Header */}
+            <div className="flex items-center justify-between mb-4">
               <h2
                 className="text-lg font-extrabold tracking-tight"
                 style={{ fontFamily: "var(--font-headline)", color: "var(--color-on-surface)" }}
@@ -589,72 +711,223 @@ export default function DashboardPage() {
               </button>
             </div>
 
-            <div className="flex flex-col gap-4">
-              {/* Name */}
-              <div>
-                <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
-                  Full Name
-                </label>
+            {/* Tabs */}
+            <div className="flex rounded-lg p-0.5 mb-5" style={{ backgroundColor: "var(--color-surface-container-low)" }}>
+              {(["manual", "scan"] as const).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => { setAddTab(tab); setScanState("idle"); setScanError(""); }}
+                  className="flex-1 py-1.5 rounded-md text-sm font-semibold transition-all flex items-center justify-center gap-1.5"
+                  style={{
+                    backgroundColor: addTab === tab ? "white" : "transparent",
+                    color: addTab === tab ? "var(--color-on-surface)" : "var(--color-on-surface-variant)",
+                    boxShadow: addTab === tab ? "0 1px 3px rgba(0,0,0,0.08)" : "none",
+                  }}
+                >
+                  <span className="material-symbols-outlined text-base">
+                    {tab === "manual" ? "edit" : "photo_camera"}
+                  </span>
+                  {tab === "manual" ? "Manual" : "Scan Photo"}
+                </button>
+              ))}
+            </div>
+
+            {/* ── Manual tab ── */}
+            {addTab === "manual" && (
+              <>
+                <div className="flex flex-col gap-4">
+                  <div>
+                    <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
+                      Full Name
+                    </label>
+                    <input
+                      type="text"
+                      value={newPatient.name}
+                      onChange={(e) => setNewPatient((p) => ({ ...p, name: e.target.value }))}
+                      placeholder="e.g. John Doe"
+                      className="w-full px-3 py-2 text-sm rounded-lg border focus:outline-none focus:ring-2"
+                      style={{ borderColor: "var(--color-outline-variant)", fontFamily: "var(--font-body)" }}
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
+                        Room
+                      </label>
+                      <input
+                        type="text"
+                        value={newPatient.room}
+                        onChange={(e) => setNewPatient((p) => ({ ...p, room: e.target.value }))}
+                        placeholder="e.g. 401A"
+                        className="w-full px-3 py-2 text-sm rounded-lg border focus:outline-none focus:ring-2"
+                        style={{ borderColor: "var(--color-outline-variant)", fontFamily: "var(--font-body)" }}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
+                        MRN
+                      </label>
+                      <input
+                        type="text"
+                        value={newPatient.mrn}
+                        onChange={(e) => setNewPatient((p) => ({ ...p, mrn: e.target.value }))}
+                        placeholder="e.g. 8839210"
+                        className="w-full px-3 py-2 text-sm rounded-lg border focus:outline-none focus:ring-2 font-mono"
+                        style={{ borderColor: "var(--color-outline-variant)", fontFamily: "var(--font-body)" }}
+                      />
+                    </div>
+                  </div>
+                  {addError && (
+                    <p className="text-xs font-medium" style={{ color: "var(--color-error)" }}>{addError}</p>
+                  )}
+                </div>
+                <div className="flex gap-3 mt-6">
+                  <button
+                    onClick={resetAddForm}
+                    className="flex-1 py-2.5 rounded-lg text-sm font-bold border transition-all hover:bg-slate-50"
+                    style={{ borderColor: "var(--color-outline-variant)", color: "var(--color-on-surface-variant)" }}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleAddPatient}
+                    className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white transition-all hover:opacity-90 active:scale-95"
+                    style={{ backgroundColor: "var(--color-primary)" }}
+                  >
+                    Save Patient
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* ── Scan tab ── */}
+            {addTab === "scan" && (
+              <>
+                {/* Hidden file input — opens camera on mobile */}
                 <input
-                  type="text"
-                  value={newPatient.name}
-                  onChange={(e) => setNewPatient((p) => ({ ...p, name: e.target.value }))}
-                  placeholder="e.g. John Doe"
-                  className="w-full px-3 py-2 text-sm rounded-lg border focus:outline-none focus:ring-2"
-                  style={{ borderColor: "var(--color-outline-variant)", fontFamily: "var(--font-body)" }}
+                  ref={scanInputRef}
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  className="hidden"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) handleScanImage(file);
+                    e.target.value = "";
+                  }}
                 />
-              </div>
 
-              {/* Room */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
-                    Room
-                  </label>
-                  <input
-                    type="text"
-                    value={newPatient.room}
-                    onChange={(e) => setNewPatient((p) => ({ ...p, room: e.target.value }))}
-                    placeholder="e.g. 401A"
-                    className="w-full px-3 py-2 text-sm rounded-lg border focus:outline-none focus:ring-2"
-                    style={{ borderColor: "var(--color-outline-variant)", fontFamily: "var(--font-body)" }}
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] font-bold uppercase tracking-wider mb-1" style={{ color: "var(--color-on-surface-variant)" }}>
-                    MRN
-                  </label>
-                  <input
-                    type="text"
-                    value={newPatient.mrn}
-                    onChange={(e) => setNewPatient((p) => ({ ...p, mrn: e.target.value }))}
-                    placeholder="e.g. 8839210"
-                    className="w-full px-3 py-2 text-sm rounded-lg border focus:outline-none focus:ring-2 font-mono"
-                    style={{ borderColor: "var(--color-outline-variant)", fontFamily: "var(--font-body)" }}
-                  />
-                </div>
-              </div>
+                {/* Idle: prompt to take photo */}
+                {scanState === "idle" && (
+                  <div className="flex flex-col items-center gap-4 py-6">
+                    <div
+                      className="w-16 h-16 rounded-full flex items-center justify-center"
+                      style={{ backgroundColor: "var(--color-primary-container)" }}
+                    >
+                      <span className="material-symbols-outlined text-3xl" style={{ color: "var(--color-on-primary-container)" }}>
+                        photo_camera
+                      </span>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-sm font-semibold" style={{ color: "var(--color-on-surface)" }}>
+                        Take a photo of your patient list
+                      </p>
+                      <p className="text-xs mt-1" style={{ color: "var(--color-on-surface-variant)" }}>
+                        Names and MRNs will be extracted automatically
+                      </p>
+                    </div>
+                    {scanError && (
+                      <p className="text-xs text-center px-4" style={{ color: "var(--color-error)" }}>{scanError}</p>
+                    )}
+                    <button
+                      onClick={() => scanInputRef.current?.click()}
+                      className="w-full py-3 rounded-xl text-sm font-bold text-white transition-all hover:opacity-90 active:scale-95 flex items-center justify-center gap-2"
+                      style={{ backgroundColor: "var(--color-primary)" }}
+                    >
+                      <span className="material-symbols-outlined text-base">photo_camera</span>
+                      Take Photo
+                    </button>
+                    <button
+                      onClick={() => {
+                        // Remove capture attribute to allow gallery selection on desktop
+                        if (scanInputRef.current) {
+                          scanInputRef.current.removeAttribute("capture");
+                          scanInputRef.current.click();
+                          // Restore for next time
+                          setTimeout(() => scanInputRef.current?.setAttribute("capture", "environment"), 500);
+                        }
+                      }}
+                      className="w-full py-2.5 rounded-xl text-sm font-bold border transition-all hover:bg-slate-50"
+                      style={{ borderColor: "var(--color-outline-variant)", color: "var(--color-on-surface-variant)" }}
+                    >
+                      Choose from Library
+                    </button>
+                  </div>
+                )}
 
-            </div>
+                {/* Scanning: spinner */}
+                {scanState === "scanning" && (
+                  <div className="flex flex-col items-center gap-3 py-10">
+                    <div className="w-8 h-8 border-2 border-t-transparent rounded-full animate-spin" style={{ borderColor: "var(--color-primary)", borderTopColor: "transparent" }} />
+                    <p className="text-sm font-medium" style={{ color: "var(--color-on-surface-variant)" }}>
+                      Reading patient list…
+                    </p>
+                  </div>
+                )}
 
-            <div className="flex gap-3 mt-6">
-              <button
-                onClick={resetAddForm}
-                className="flex-1 py-2.5 rounded-lg text-sm font-bold border transition-all hover:bg-slate-50"
-                style={{ borderColor: "var(--color-outline-variant)", color: "var(--color-on-surface-variant)" }}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleAddPatient}
-                className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white transition-all hover:opacity-90 active:scale-95"
-                style={{ backgroundColor: "var(--color-primary)" }}
-              >
-                Save Patient
-              </button>
-            </div>
+                {/* Review: show extracted patients */}
+                {scanState === "review" && (
+                  <>
+                    <p className="text-xs font-semibold uppercase tracking-wider mb-3" style={{ color: "var(--color-on-surface-variant)" }}>
+                      {scannedPatients.length} patient{scannedPatients.length !== 1 ? "s" : ""} found
+                    </p>
+                    <div className="flex flex-col gap-2 max-h-56 overflow-y-auto mb-5">
+                      {scannedPatients.map((p, i) => (
+                        <div
+                          key={i}
+                          className="flex items-center justify-between px-3 py-2 rounded-lg"
+                          style={{ backgroundColor: "var(--color-surface-container-low)" }}
+                        >
+                          <span className="text-sm font-medium truncate" style={{ color: "var(--color-on-surface)" }}>
+                            {p.name}
+                          </span>
+                          <div className="flex items-center gap-2 ml-3 shrink-0">
+                            {p.location && (
+                              <span className="text-xs px-1.5 py-0.5 rounded" style={{ backgroundColor: "var(--color-surface-container)", color: "var(--color-on-surface-variant)" }}>
+                                {p.location}
+                              </span>
+                            )}
+                            {p.mrn && (
+                              <span className="text-xs font-mono" style={{ color: "var(--color-on-surface-variant)" }}>
+                                {p.mrn}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex gap-3">
+                      <button
+                        onClick={() => { setScanState("idle"); setScannedPatients([]); }}
+                        className="flex-1 py-2.5 rounded-lg text-sm font-bold border transition-all hover:bg-slate-50"
+                        style={{ borderColor: "var(--color-outline-variant)", color: "var(--color-on-surface-variant)" }}
+                      >
+                        Retake
+                      </button>
+                      <button
+                        onClick={handleAddAllScanned}
+                        className="flex-1 py-2.5 rounded-lg text-sm font-bold text-white transition-all hover:opacity-90 active:scale-95"
+                        style={{ backgroundColor: "var(--color-primary)" }}
+                      >
+                        Add All
+                      </button>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
           </div>
-        </div>
+        </Modal>
       )}
 
       {/* ── Compliance Modal ── */}

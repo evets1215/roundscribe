@@ -1,8 +1,9 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // (Keep default config for Next.js 16. If you hit upload limits in production,
-  // configure your hosting/proxy layer or chunk uploads.)
+  experimental: {
+    serverBodySizeLimit: "15mb",
+  } as NextConfig["experimental"],
 };
 
 export default nextConfig;
