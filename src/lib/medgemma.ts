@@ -46,6 +46,9 @@ export interface StructuredNote {
   social_section?: NoteSection;
   /** Full raw text returned by the model */
   rawText: string;
+  /** Surgical ops used to produce rawText (present when format === "SOAP" via handoff) */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ops?: any[];
 }
 
 export interface MedGemmaAdapter {

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { signOut } from "next-auth/react";
@@ -12,19 +12,45 @@ function storePatient(patient: Patient) {
   try { sessionStorage.setItem(`rs-patient-${patient.id}`, JSON.stringify(patient)); } catch {}
 }
 
-type SortKey = "status" | "mrn";
+type SortKey = "status" | "mrn" | "room";
+type ColKey = "name" | "room" | "status" | "mrn";
 
-const TOTAL_PATIENTS = 12;
+const DEFAULT_COL_ORDER: ColKey[] = ["name", "room", "status", "mrn"];
+const COL_LABEL: Record<ColKey, string> = { name: "Name", room: "Room", status: "Status", mrn: "MRN" };
+const SORTABLE_COLS = new Set<ColKey>(["room", "status", "mrn"]);
 
-const sortableColumns: { label: string; key: SortKey }[] = [
-  { label: "Status", key: "status" },
-  { label: "MRN", key: "mrn" },
-];
 
-const SEX_OPTIONS: { label: string; value: "M" | "F" }[] = [
-  { label: "Male", value: "M" },
-  { label: "Female", value: "F" },
-];
+type TaskStatus = "pending" | "awaiting_result" | "done" | "carry_forward" | "resolved";
+interface HandoffItem {
+  id: string;
+  text: string;
+  status: TaskStatus;
+  createdAt?: number;
+}
+interface HandoffData {
+  items: HandoffItem[];
+  note: string;
+}
+
+const STATUS_CYCLE: TaskStatus[] = ["pending", "done", "awaiting_result", "carry_forward"];
+const STATUS_ICON: Record<TaskStatus, string> = {
+  pending:        "radio_button_unchecked",
+  done:           "check_circle",
+  awaiting_result:"hourglass_empty",
+  carry_forward:  "arrow_forward",
+  resolved:       "cancel",
+};
+const STATUS_COLOR: Record<TaskStatus, string> = {
+  pending:        "var(--color-on-surface-variant)",
+  done:           "#16a34a",
+  awaiting_result:"#d97706",
+  carry_forward:  "var(--color-primary)",
+  resolved:       "var(--color-outline)",
+};
+
+function migrateItems(items: (HandoffItem & { done?: boolean })[]): HandoffItem[] {
+  return items.map((i) => i.status ? i : { ...i, status: i.done ? "done" : "pending" } as HandoffItem);
+}
 
 interface NewPatientForm {
   name: string;
@@ -34,7 +60,7 @@ interface NewPatientForm {
   sex: "M" | "F";
 }
 
-function Modal({ onClose, children }: { onClose: () => void; children: React.ReactNode }) {
+function Modal({ onClose, children, sheet = false }: { onClose: () => void; children: React.ReactNode; sheet?: boolean }) {
   const backdropRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -46,7 +72,7 @@ function Modal({ onClose, children }: { onClose: () => void; children: React.Rea
   return (
     <div
       ref={backdropRef}
-      className="fixed inset-0 z-50 flex items-center justify-center"
+      className={`fixed inset-0 z-50 flex justify-center ${sheet ? "items-end md:items-center" : "items-center"}`}
       style={{ backgroundColor: "rgba(0,0,0,0.35)" }}
       onClick={(e) => { if (e.target === backdropRef.current) onClose(); }}
     >
@@ -65,6 +91,35 @@ export default function DashboardPage() {
     return initialPatients;
   });
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
+  const [colOrder, setColOrder] = useState<ColKey[]>(() => {
+    try {
+      const saved = localStorage.getItem("rs-col-order");
+      if (saved) return JSON.parse(saved) as ColKey[];
+    } catch {}
+    return DEFAULT_COL_ORDER;
+  });
+  const [dragCol, setDragCol] = useState<ColKey | null>(null);
+  const [dragOverCol, setDragOverCol] = useState<ColKey | null>(null);
+  const [openHandoff, setOpenHandoff] = useState<string | null>(null);
+  const [pendingFocusId, setPendingFocusId] = useState<string | null>(null);
+  const [swipedPatientId, setSwipedPatientId] = useState<string | null>(null);
+  const touchStartX = useRef(0);
+  const touchStartY = useRef(0);
+  const [handoffNotes, setHandoffNotes] = useState<Record<string, HandoffData>>(() => {
+    try {
+      const saved = localStorage.getItem("rs-handoff");
+      if (saved) {
+        const raw = JSON.parse(saved) as Record<string, HandoffData & { items: (HandoffItem & { done?: boolean })[] }>;
+        // Migrate items that have done: boolean but no status
+        const migrated: Record<string, HandoffData> = {};
+        for (const [k, v] of Object.entries(raw)) {
+          migrated[k] = { ...v, items: migrateItems(v.items ?? []) };
+        }
+        return migrated;
+      }
+    } catch {}
+    return {};
+  });
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -107,6 +162,23 @@ export default function DashboardPage() {
     try { localStorage.setItem("rs-patient-list", JSON.stringify(patients)); } catch {}
   }, [patients]);
 
+  // Persist column order
+  useEffect(() => {
+    try { localStorage.setItem("rs-col-order", JSON.stringify(colOrder)); } catch {}
+  }, [colOrder]);
+
+  // Persist handoff notes
+  useEffect(() => {
+    try { localStorage.setItem("rs-handoff", JSON.stringify(handoffNotes)); } catch {}
+  }, [handoffNotes]);
+
+  // Focus newly created checklist items
+  useEffect(() => {
+    if (!pendingFocusId) return;
+    document.getElementById(`hi-${pendingFocusId}`)?.focus();
+    setPendingFocusId(null);
+  }, [pendingFocusId]);
+
   const handleSort = (key: SortKey) => {
     setSort((prev) => {
       if (prev?.key === key) return { key, dir: prev.dir === "asc" ? "desc" : "asc" };
@@ -117,6 +189,97 @@ export default function DashboardPage() {
   const getSortIcon = (key: SortKey) => {
     if (sort?.key !== key) return "unfold_more";
     return sort.dir === "asc" ? "arrow_upward" : "arrow_downward";
+  };
+
+  const handleColDragStart = (key: ColKey) => setDragCol(key);
+  const handleColDragOver = (e: React.DragEvent, key: ColKey) => { e.preventDefault(); setDragOverCol(key); };
+  const handleColDrop = (key: ColKey) => {
+    if (!dragCol || dragCol === key) return;
+    setColOrder(prev => {
+      const next = [...prev];
+      const from = next.indexOf(dragCol);
+      const to = next.indexOf(key);
+      next.splice(from, 1);
+      next.splice(to, 0, dragCol);
+      return next;
+    });
+    setDragCol(null);
+    setDragOverCol(null);
+  };
+  const handleColDragEnd = () => { setDragCol(null); setDragOverCol(null); };
+
+  const getHandoff = (patientId: string): HandoffData =>
+    handoffNotes[patientId] ?? { items: [], note: "" };
+
+  const toggleHandoff = (patientId: string) => {
+    setOpenHandoff(prev => {
+      if (prev === patientId) return null;
+      let firstId: string | null = null;
+      setHandoffNotes(n => {
+        if (n[patientId]?.items?.length) {
+          firstId = n[patientId].items[0].id;
+          return n;
+        }
+        firstId = `h-${Date.now()}`;
+        return { ...n, [patientId]: { items: [{ id: firstId, text: "", status: "pending" as TaskStatus, createdAt: Date.now() }], note: "" } };
+      });
+      if (firstId) setPendingFocusId(firstId);
+      return patientId;
+    });
+  };
+
+  const updateHandoffItem = (patientId: string, itemId: string, text: string) => {
+    setHandoffNotes(prev => {
+      const d = getHandoff(patientId);
+      return { ...prev, [patientId]: { ...d, items: d.items.map(i => i.id === itemId ? { ...i, text } : i) } };
+    });
+  };
+
+  const cycleHandoffStatus = (patientId: string, itemId: string) => {
+    setHandoffNotes(prev => {
+      const d = getHandoff(patientId);
+      return {
+        ...prev,
+        [patientId]: {
+          ...d,
+          items: d.items.map((i) => {
+            if (i.id !== itemId) return i;
+            const idx = STATUS_CYCLE.indexOf(i.status);
+            return { ...i, status: STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length] };
+          }),
+        },
+      };
+    });
+  };
+
+  const updateHandoffNote = (patientId: string, note: string) => {
+    setHandoffNotes(prev => ({ ...prev, [patientId]: { ...getHandoff(patientId), note } }));
+  };
+
+  const addHandoffItem = (patientId: string, afterId?: string) => {
+    const newItem: HandoffItem = { id: `h-${Date.now()}-${Math.random()}`, text: "", status: "pending", createdAt: Date.now() };
+    setHandoffNotes(prev => {
+      const d = getHandoff(patientId);
+      if (afterId) {
+        const idx = d.items.findIndex(i => i.id === afterId);
+        const next = [...d.items];
+        next.splice(idx + 1, 0, newItem);
+        return { ...prev, [patientId]: { ...d, items: next } };
+      }
+      return { ...prev, [patientId]: { ...d, items: [...d.items, newItem] } };
+    });
+    setPendingFocusId(newItem.id);
+  };
+
+  const removeHandoffItem = (patientId: string, itemId: string) => {
+    setHandoffNotes(prev => {
+      const d = getHandoff(patientId);
+      if (d.items.length <= 1) return prev;
+      const idx = d.items.findIndex(i => i.id === itemId);
+      const next = d.items.filter(i => i.id !== itemId);
+      setPendingFocusId(next[Math.max(0, idx - 1)]?.id ?? null);
+      return { ...prev, [patientId]: { ...d, items: next } };
+    });
   };
 
   const filtered = patients.filter((p) => {
@@ -133,6 +296,11 @@ export default function DashboardPage() {
     if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
     if (!sort) return 0;
     const dir = sort.dir === "asc" ? 1 : -1;
+    if (sort.key === "room") {
+      const aVal = (a.room ?? "").split("/")[0];
+      const bVal = (b.room ?? "").split("/")[0];
+      return aVal.localeCompare(bVal, undefined, { numeric: true, sensitivity: "base" }) * dir;
+    }
     const aVal = a[sort.key] as string;
     const bVal = b[sort.key] as string;
     return aVal < bVal ? -dir : aVal > bVal ? dir : 0;
@@ -140,6 +308,9 @@ export default function DashboardPage() {
 
   const handleAddPatient = () => {
     setAddError("");
+    if (!newPatient.name.trim()) { setAddError("Patient name is required."); return; }
+    if (!newPatient.room.trim()) { setAddError("Room is required."); return; }
+    if (!newPatient.mrn.trim()) { setAddError("MRN is required."); return; }
 
     const created: Patient = {
       id: `local-${Date.now()}`,
@@ -307,7 +478,7 @@ export default function DashboardPage() {
                   className="text-xs font-medium"
                   style={{ color: "var(--color-on-surface-variant)" }}
                 >
-                  {TOTAL_PATIENTS} Patients assigned
+                  {patients.length} Patients assigned
                 </p>
                 <div
                   className="h-3 w-px"
@@ -318,7 +489,7 @@ export default function DashboardPage() {
                     className="text-xs font-bold"
                     style={{ color: "var(--color-primary)" }}
                   >
-                    Progress: {roundedPatients}/{TOTAL_PATIENTS}
+                    Progress: {roundedPatients}/{patients.length}
                   </span>
                   <div
                     className="w-24 h-1.5 rounded-full overflow-hidden"
@@ -330,7 +501,7 @@ export default function DashboardPage() {
                       className="h-full rounded-full"
                       style={{
                         backgroundColor: "var(--color-primary)",
-                        width: `${(roundedPatients / TOTAL_PATIENTS) * 100}%`,
+                        width: patients.length > 0 ? `${(roundedPatients / patients.length) * 100}%` : "0%",
                       }}
                     />
                   </div>
@@ -341,7 +512,7 @@ export default function DashboardPage() {
             <div className="flex items-center gap-2">
               <button
                 onClick={() => setShowAddPatient(true)}
-                className="flex items-center gap-1.5 px-4 py-2.5 rounded text-xs font-bold text-white shadow-sm hover:opacity-90 transition-all active:scale-95"
+                className="flex items-center gap-1.5 px-4 py-2.5 min-h-[44px] rounded text-xs font-bold text-white shadow-sm hover:opacity-90 transition-all active:scale-95 touch-manipulation"
                 style={{ backgroundColor: "var(--color-primary)" }}
               >
                 <span className="material-symbols-outlined text-base">add</span>
@@ -359,108 +530,197 @@ export default function DashboardPage() {
             }}
           >
             {/* Mobile: card list */}
-            <div className="md:hidden p-3 space-y-3">
+            <div className="md:hidden p-3 space-y-2">
               {sortedPatients.map((patient) => (
-                <div
-                  key={patient.id}
-                  className="rounded-lg p-4"
-                  style={{
-                    backgroundColor: "var(--color-surface)",
-                    border: "1px solid var(--color-outline-variant)",
-                  }}
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div
-                        className="text-[11px] font-bold uppercase tracking-wide"
-                        style={{ color: "var(--color-primary)" }}
-                      >
-                        {patient.room}
-                      </div>
-                      <div
-                        className="text-base font-extrabold truncate"
-                        style={{ color: "var(--color-on-surface)" }}
-                      >
+                <div key={patient.id}>
+                <div className="relative rounded-lg overflow-hidden" style={{ border: "1px solid var(--color-outline-variant)" }}>
+                  {/* Swipe-to-delete reveal */}
+                  <div
+                    className="absolute right-0 top-0 bottom-0 flex items-center justify-center"
+                    style={{ width: 64, backgroundColor: "#ef4444" }}
+                  >
+                    <button
+                      onClick={() => { deletePatient(patient.id); setSwipedPatientId(null); }}
+                      className="flex items-center justify-center w-full h-full"
+                      aria-label="Delete patient"
+                    >
+                      <span className="material-symbols-outlined text-white text-xl">delete</span>
+                    </button>
+                  </div>
+
+                  {/* Swipeable card content */}
+                  <div
+                    onTouchStart={(e) => {
+                      touchStartX.current = e.touches[0].clientX;
+                      touchStartY.current = e.touches[0].clientY;
+                    }}
+                    onTouchMove={(e) => {
+                      const dx = e.touches[0].clientX - touchStartX.current;
+                      const dy = e.touches[0].clientY - touchStartY.current;
+                      if (Math.abs(dx) < Math.abs(dy)) return; // vertical scroll, ignore
+                      if (dx < -40) setSwipedPatientId(patient.id);
+                      else if (dx > 20) setSwipedPatientId(null);
+                    }}
+                    className="relative flex items-center gap-4 px-4 py-4"
+                    style={{
+                      backgroundColor: "var(--color-surface)",
+                      transform: swipedPatientId === patient.id ? "translateX(-64px)" : "translateX(0)",
+                      transition: "transform 0.2s ease",
+                    }}
+                  >
+                    {/* Room number — large, primary, left anchor */}
+                    <button
+                      onClick={() => { storePatient(patient); router.push(`/patients/${patient.id}`); }}
+                      className="shrink-0 text-2xl font-black leading-none min-w-[56px] text-left"
+                      style={{ color: "var(--color-primary)", fontFamily: "var(--font-mono)" }}
+                    >
+                      {patient.room}
+                    </button>
+
+                    {/* Name + status */}
+                    <button
+                      onClick={() => { storePatient(patient); router.push(`/patients/${patient.id}`); }}
+                      className="flex-1 min-w-0 text-left"
+                    >
+                      <div className="text-base font-bold truncate" style={{ color: "var(--color-on-surface)" }}>
                         {patient.name}
                       </div>
-                      <div
-                        className="mt-1 text-[11px]"
-                        style={{ color: "var(--color-on-surface-variant)" }}
-                      >
-                        MRN {patient.mrn}
+                      <div className="text-[11px] font-bold uppercase tracking-wide mt-0.5" style={{ color: "var(--color-on-surface-variant)" }}>
+                        {getHandoff(patient.id).items.some((i) => i.text.trim()) ? "In Progress" : patient.status}
                       </div>
-                    </div>
+                    </button>
 
+                    {/* Mic + Handoff */}
                     <div className="flex items-center gap-1 shrink-0">
                       <button
-                        onClick={() => togglePin(patient.id)}
-                        className="p-2 rounded-md"
-                        title={patient.pinned ? "Unpin patient" : "Pin patient"}
-                        style={{ color: patient.pinned ? "var(--color-primary)" : "#cbd5e1" }}
-                      >
-                        <span
-                          className="material-symbols-outlined"
-                          style={patient.pinned ? { fontVariationSettings: "'FILL' 1" } : {}}
-                        >
-                          push_pin
-                        </span>
-                      </button>
-                      <button
-                        onClick={() => deletePatient(patient.id)}
-                        className="p-2 rounded-md transition-colors hover:bg-red-50"
-                        title="Remove patient"
-                        style={{ color: "#cbd5e1" }}
-                      >
-                        <span className="material-symbols-outlined">delete</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  <div className="mt-3 flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2">
-                      <StatusBadge status={patient.status} />
-                      <span
-                        className="text-[11px] font-medium"
+                        onClick={() => { storePatient(patient); router.push(`/patients/${patient.id}?record=1`); }}
+                        className="p-2 rounded-full transition-colors hover:bg-slate-100 min-w-[44px] min-h-[44px] flex items-center justify-center"
+                        title="Record"
                         style={{ color: "var(--color-on-surface-variant)" }}
                       >
-                        Last: {patient.lastNote}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => { storePatient(patient); router.push(`/patients/${patient.id}?record=1`); }}
-                        className="p-2 rounded-md transition-colors hover:bg-slate-100"
-                        title="Start Recording"
-                        style={{ color: "var(--color-primary)" }}
-                      >
-                        <span className="material-symbols-outlined">mic</span>
+                        <span className="material-symbols-outlined text-xl">mic</span>
                       </button>
-                      <Link
-                        href={`/patients/${patient.id}`} onClick={() => storePatient(patient)}
-                        className="px-3 py-2 rounded-md text-xs font-bold uppercase tracking-wider"
+                      <button
+                        onClick={() => toggleHandoff(patient.id)}
+                        className="px-3 py-2 rounded-md text-xs font-bold uppercase tracking-wider transition-colors min-h-[44px]"
                         style={{
-                          backgroundColor: "var(--color-primary)",
-                          color: "white",
+                          backgroundColor: openHandoff === patient.id || getHandoff(patient.id).items.some((i) => i.text.trim())
+                            ? "var(--color-primary)" : "transparent",
+                          color: openHandoff === patient.id || getHandoff(patient.id).items.some((i) => i.text.trim())
+                            ? "white" : "var(--color-primary)",
+                          border: "1px solid var(--color-primary)",
                         }}
                       >
-                        Open
-                      </Link>
+                        Handoff
+                      </button>
                     </div>
                   </div>
+                </div>{/* end swipe container */}
+                  {openHandoff === patient.id && (
+                    <div className="mt-1 rounded-xl overflow-hidden" style={{ border: "1px solid var(--color-outline-variant)" }}>
+                      {/* Header */}
+                      <div
+                        className="flex items-center justify-between px-4 py-3"
+                        style={{ backgroundColor: "var(--color-surface-container-low)", borderBottom: "1px solid var(--color-outline-variant)" }}
+                      >
+                        <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: "var(--color-on-surface)" }}>Patient Handoff</span>
+                        <span className="text-[10px] font-medium uppercase tracking-widest" style={{ color: "var(--color-on-surface-variant)" }}>Auto-saving</span>
+                      </div>
+
+                      {/* Task list */}
+                      <div className="px-4 py-3 space-y-0.5" style={{ backgroundColor: "var(--color-surface)" }}>
+                        {getHandoff(patient.id).items.map((item, idx) => (
+                          <div key={item.id} className="flex items-center gap-1">
+                            <button
+                              onClick={() => cycleHandoffStatus(patient.id, item.id)}
+                              title={`Status: ${item.status} — tap to cycle`}
+                              className="shrink-0 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-full transition-colors"
+                              style={{ color: STATUS_COLOR[item.status] }}
+                            >
+                              <span className="material-symbols-outlined text-xl" style={{ fontVariationSettings: "'FILL' 1" }}>
+                                {STATUS_ICON[item.status]}
+                              </span>
+                            </button>
+                            <input
+                              id={`hi-${item.id}`}
+                              type="text"
+                              value={item.text}
+                              onChange={(e) => updateHandoffItem(patient.id, item.id, e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") { e.preventDefault(); addHandoffItem(patient.id, item.id); }
+                                if (e.key === "Backspace" && item.text === "") { e.preventDefault(); removeHandoffItem(patient.id, item.id); }
+                              }}
+                              placeholder={idx === 0 ? "Add task..." : ""}
+                              className="flex-1 bg-transparent text-sm outline-none min-h-[44px]"
+                              style={{
+                                color: item.status === "done" || item.status === "resolved"
+                                  ? "var(--color-on-surface-variant)"
+                                  : "var(--color-on-surface)",
+                                textDecoration: item.status === "resolved" ? "line-through" : "none",
+                              }}
+                            />
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Free text note */}
+                      <div className="px-4 pb-3 pt-1" style={{ backgroundColor: "var(--color-surface)", borderTop: "1px solid var(--color-outline-variant)" }}>
+                        <textarea
+                          value={getHandoff(patient.id).note}
+                          onChange={(e) => updateHandoffNote(patient.id, e.target.value)}
+                          placeholder="Start typing clinical notes here..."
+                          rows={3}
+                          className="w-full bg-transparent text-sm outline-none resize-none"
+                          style={{ color: "var(--color-on-surface)" }}
+                        />
+                      </div>
+
+                      {/* Full-width Save/Done CTA */}
+                      <button
+                        onClick={() => toggleHandoff(patient.id)}
+                        className="w-full py-4 text-sm font-bold uppercase tracking-widest text-white transition-colors"
+                        style={{ backgroundColor: "var(--color-primary)" }}
+                      >
+                        Save Handoff
+                      </button>
+                    </div>
+                  )}
                 </div>
               ))}
 
               {sortedPatients.length === 0 && (
                 <div
-                  className="rounded-lg p-6 text-center text-sm"
+                  className="rounded-lg p-8 text-center"
                   style={{
                     backgroundColor: "var(--color-surface)",
                     border: "1px solid var(--color-outline-variant)",
-                    color: "var(--color-on-surface-variant)",
                   }}
                 >
-                  No patients match &quot;{searchQuery}&quot;
+                  {searchQuery ? (
+                    <p className="text-sm" style={{ color: "var(--color-on-surface-variant)" }}>
+                      No patients match &ldquo;{searchQuery}&rdquo;
+                    </p>
+                  ) : (
+                    <>
+                      <span className="material-symbols-outlined text-4xl mb-3 block" style={{ color: "var(--color-on-surface-variant)" }}>
+                        assignment_ind
+                      </span>
+                      <p className="text-sm font-medium mb-1" style={{ color: "var(--color-on-surface)" }}>
+                        Your patient list is empty
+                      </p>
+                      <p className="text-xs mb-4" style={{ color: "var(--color-on-surface-variant)" }}>
+                        Add patients to start tracking your rounding tasks
+                      </p>
+                      <button
+                        onClick={() => setShowAddPatient(true)}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium text-white transition-colors"
+                        style={{ backgroundColor: "var(--color-primary)" }}
+                      >
+                        <span className="material-symbols-outlined text-sm">add</span>
+                        Add Patient
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -481,34 +741,45 @@ export default function DashboardPage() {
                     >
                       Pinned
                     </th>
-                    <th
-                      className="px-4 py-2.5 text-[11px] font-bold uppercase tracking-wider"
-                      style={{ color: "var(--color-on-surface-variant)" }}
-                    >
-                      Name / Room
-                    </th>
-                    {sortableColumns.map(({ label, key }) => (
+                    {colOrder.map((key) => (
                       <th
-                        key={label}
-                        className="px-4 py-2.5 text-[11px] font-bold uppercase tracking-wider"
-                        style={{ color: "var(--color-on-surface-variant)" }}
+                        key={key}
+                        draggable
+                        onDragStart={() => handleColDragStart(key)}
+                        onDragOver={(e) => handleColDragOver(e, key)}
+                        onDrop={() => handleColDrop(key)}
+                        onDragEnd={handleColDragEnd}
+                        className="px-4 py-2.5 text-[11px] font-bold uppercase tracking-wider select-none"
+                        style={{
+                          color: "var(--color-on-surface-variant)",
+                          cursor: "grab",
+                          borderLeft: dragOverCol === key && dragCol !== key ? "2px solid var(--color-primary)" : "2px solid transparent",
+                          opacity: dragCol === key ? 0.4 : 1,
+                          transition: "opacity 0.15s",
+                        }}
                       >
-                        <button
-                          onClick={() => handleSort(key)}
-                          className="flex items-center gap-1 uppercase transition-colors hover:opacity-70 min-h-[44px] py-2"
-                        >
-                          {label}
-                          <span
-                            className="material-symbols-outlined"
-                            style={{
-                              fontSize: "14px",
-                              opacity: sort?.key === key ? 1 : 0.5,
-                              color: sort?.key === key ? "var(--color-primary)" : undefined,
-                            }}
+                        {SORTABLE_COLS.has(key) ? (
+                          <button
+                            onClick={() => handleSort(key as SortKey)}
+                            className="flex items-center gap-1 uppercase transition-colors hover:opacity-70 min-h-[44px] py-2"
                           >
-                            {getSortIcon(key)}
+                            {COL_LABEL[key]}
+                            <span
+                              className="material-symbols-outlined"
+                              style={{
+                                fontSize: "14px",
+                                opacity: sort?.key === key ? 1 : 0.5,
+                                color: sort?.key === key ? "var(--color-primary)" : undefined,
+                              }}
+                            >
+                              {getSortIcon(key as SortKey)}
+                            </span>
+                          </button>
+                        ) : (
+                          <span className="flex items-center gap-1 min-h-[44px] py-2">
+                            {COL_LABEL[key]}
                           </span>
-                        </button>
+                        )}
                       </th>
                     ))}
                     <th
@@ -521,8 +792,8 @@ export default function DashboardPage() {
                 </thead>
                 <tbody>
                   {sortedPatients.map((patient) => (
+                    <React.Fragment key={patient.id}>
                     <tr
-                      key={patient.id}
                       className="group transition-colors hover:bg-slate-50/50"
                       style={{
                         borderBottom: "1px solid var(--color-outline-variant)",
@@ -553,44 +824,38 @@ export default function DashboardPage() {
                         </button>
                       </td>
 
-                      {/* Name + Room */}
-                      <td className="px-4 py-3">
-                        <Link href={`/patients/${patient.id}`} onClick={() => storePatient(patient)} className="block">
-                          <span
-                            className="text-xs font-bold block uppercase tracking-wide"
-                            style={{ color: "var(--color-primary)" }}
-                          >
-                            {patient.room}
-                          </span>
-                          <span
-                            className="text-sm font-bold transition-colors group-hover:opacity-80"
-                            style={{ color: "var(--color-on-surface)" }}
-                          >
-                            {patient.name}
-                          </span>
-                        </Link>
-                      </td>
-
-                      {/* Status */}
-                      <td className="px-4 py-3">
-                        <div className="flex flex-col gap-1">
-                          <StatusBadge status={patient.status} />
-                          <span
-                            className="text-[10px] font-medium"
-                            style={{ color: "var(--color-on-surface-variant)" }}
-                          >
-                            Last Rec: {patient.lastNote}
-                          </span>
-                        </div>
-                      </td>
-
-                      {/* MRN */}
-                      <td
-                        className="px-4 py-3 text-xs font-mono"
-                        style={{ color: "var(--color-on-surface-variant)" }}
-                      >
-                        {patient.mrn}
-                      </td>
+                      {colOrder.map((key) => (
+                        <td key={key} className="px-4 py-3">
+                          {key === "name" && (
+                            <Link href={`/patients/${patient.id}`} onClick={() => storePatient(patient)} className="block">
+                              <span
+                                className="text-sm font-bold transition-colors group-hover:opacity-80"
+                                style={{ color: "var(--color-on-surface)" }}
+                              >
+                                {patient.name}
+                              </span>
+                            </Link>
+                          )}
+                          {key === "room" && (
+                            <span className="text-xs font-bold uppercase tracking-wide" style={{ color: "var(--color-primary)" }}>
+                              {patient.room}
+                            </span>
+                          )}
+                          {key === "status" && (
+                            <div className="flex flex-col gap-1">
+                              <StatusBadge status={patient.status} />
+                              <span className="text-[10px] font-medium" style={{ color: "var(--color-on-surface-variant)" }}>
+                                Last Rec: {patient.lastNote}
+                              </span>
+                            </div>
+                          )}
+                          {key === "mrn" && (
+                            <span className="text-xs font-mono" style={{ color: "var(--color-on-surface-variant)" }}>
+                              {patient.mrn}
+                            </span>
+                          )}
+                        </td>
+                      ))}
 
                       {/* Action */}
                       <td className="px-4 py-3 text-right">
@@ -612,22 +877,17 @@ export default function DashboardPage() {
                               mic
                             </span>
                           </button>
-                          <Link
-                            href={`/patients/${patient.id}`} onClick={() => storePatient(patient)}
-                            className="font-bold text-[11px] hover:underline uppercase tracking-wider w-16 text-right min-h-[44px] flex items-center justify-end"
+                          <button
+                            onClick={() => toggleHandoff(patient.id)}
+                            className="font-bold text-[11px] uppercase tracking-wider min-h-[44px] px-3 rounded-md transition-colors"
                             style={{
-                              color:
-                                patient.status === "Updated"
-                                  ? "var(--color-on-surface-variant)"
-                                  : "var(--color-primary)",
+                              backgroundColor: openHandoff === patient.id ? "var(--color-primary)" : "transparent",
+                              color: openHandoff === patient.id ? "white" : "var(--color-primary)",
+                              border: "1px solid var(--color-primary)",
                             }}
                           >
-                            {patient.status === "Pending"
-                              ? "Round"
-                              : patient.status === "In Progress"
-                              ? "Resume"
-                              : "View"}
-                          </Link>
+                            Handoff
+                          </button>
                           <button
                             onClick={() => deletePatient(patient.id)}
                             className="p-2.5 rounded-full transition-colors hover:bg-red-50 min-w-[44px] min-h-[44px] flex items-center justify-center"
@@ -639,11 +899,95 @@ export default function DashboardPage() {
                         </div>
                       </td>
                     </tr>
+                    {openHandoff === patient.id && (
+                      <tr>
+                        <td colSpan={colOrder.length + 2} className="px-4 pb-4">
+                          <div
+                            className="rounded-lg p-4"
+                            style={{ backgroundColor: "var(--color-surface-container-low)", border: "1px solid var(--color-outline-variant)" }}
+                          >
+                            <div className="flex items-center justify-between pb-2 mb-3" style={{ borderBottom: "1px solid var(--color-outline-variant)" }}>
+                              <span className="text-[11px] font-bold uppercase tracking-widest" style={{ color: "var(--color-on-surface)" }}>
+                                Patient Handoff Checklist
+                              </span>
+                              <span className="text-[11px] font-bold uppercase tracking-widest" style={{ color: "var(--color-on-surface-variant)" }}>
+                                Enter notes line-by-line
+                              </span>
+                            </div>
+                            <div className="space-y-1">
+                              {getHandoff(patient.id).items.map((item, idx) => (
+                                <div key={item.id} className="flex items-center gap-2">
+                                  <button
+                                    onClick={() => cycleHandoffStatus(patient.id, item.id)}
+                                    title={`Status: ${item.status} — tap to cycle`}
+                                    className="shrink-0 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-full transition-colors"
+                                    style={{ color: STATUS_COLOR[item.status] }}
+                                  >
+                                    <span className="material-symbols-outlined text-base" style={{ fontVariationSettings: "'FILL' 1" }}>
+                                      {STATUS_ICON[item.status]}
+                                    </span>
+                                  </button>
+                                  <input
+                                    id={`hi-${item.id}`}
+                                    type="text"
+                                    value={item.text}
+                                    onChange={(e) => updateHandoffItem(patient.id, item.id, e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === "Enter") { e.preventDefault(); addHandoffItem(patient.id, item.id); }
+                                      if (e.key === "Backspace" && item.text === "") { e.preventDefault(); removeHandoffItem(patient.id, item.id); }
+                                    }}
+                                    placeholder={idx === 0 ? "Add task..." : ""}
+                                    className="flex-1 bg-transparent text-sm outline-none"
+                                    style={{
+                                      color: item.status === "done" || item.status === "resolved"
+                                        ? "var(--color-on-surface-variant)"
+                                        : "var(--color-on-surface)",
+                                      textDecoration: item.status === "resolved" ? "line-through" : "none",
+                                    }}
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                            <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--color-outline-variant)" }}>
+                              <textarea
+                                value={getHandoff(patient.id).note}
+                                onChange={(e) => updateHandoffNote(patient.id, e.target.value)}
+                                placeholder="Free text notes..."
+                                rows={3}
+                                className="w-full bg-transparent text-sm outline-none resize-none"
+                                style={{ color: "var(--color-on-surface)" }}
+                              />
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                    </React.Fragment>
                   ))}
                   {sortedPatients.length === 0 && (
                     <tr>
-                      <td colSpan={7} className="px-4 py-8 text-center text-sm" style={{ color: "var(--color-on-surface-variant)" }}>
-                        No patients match &quot;{searchQuery}&quot;
+                      <td colSpan={7} className="px-4 py-12 text-center">
+                        {searchQuery ? (
+                          <span className="text-sm" style={{ color: "var(--color-on-surface-variant)" }}>
+                            No patients match &ldquo;{searchQuery}&rdquo;
+                          </span>
+                        ) : (
+                          <div className="flex flex-col items-center gap-2">
+                            <span className="material-symbols-outlined text-4xl" style={{ color: "var(--color-on-surface-variant)" }}>
+                              assignment_ind
+                            </span>
+                            <p className="text-sm font-medium" style={{ color: "var(--color-on-surface)" }}>Your patient list is empty</p>
+                            <p className="text-xs mb-2" style={{ color: "var(--color-on-surface-variant)" }}>Add patients to start tracking your rounding tasks</p>
+                            <button
+                              onClick={() => setShowAddPatient(true)}
+                              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md text-sm font-medium text-white transition-colors"
+                              style={{ backgroundColor: "var(--color-primary)" }}
+                            >
+                              <span className="material-symbols-outlined text-sm">add</span>
+                              Add Patient
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   )}
@@ -689,9 +1033,9 @@ export default function DashboardPage() {
 
       {/* ── Add Patient Modal ── */}
       {showAddPatient && (
-        <Modal onClose={resetAddForm}>
+        <Modal onClose={resetAddForm} sheet>
           <div
-            className="w-full max-w-md mx-0 md:mx-4 rounded-t-2xl md:rounded-xl shadow-xl p-5 md:p-6 fixed bottom-0 left-0 right-0 md:static max-h-[88vh] overflow-y-auto"
+            className="w-full md:max-w-md md:mx-4 rounded-t-2xl md:rounded-xl shadow-xl p-5 md:p-6 max-h-[88svh] overflow-y-auto"
             style={{ backgroundColor: "white" }}
           >
             {/* Header */}

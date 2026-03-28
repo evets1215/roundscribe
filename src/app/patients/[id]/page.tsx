@@ -6,17 +6,208 @@ import { useRouter, useParams } from "next/navigation";
 import AppSidebar from "@/components/AppSidebar";
 import { garyBaileyNote, IcdCode, type Patient } from "@/lib/data";
 import { extractRawNoteText } from "@/lib/patient-records";
-import { useAudioRecorder, formatDuration } from "@/lib/useAudioRecorder";
 import type { StructuredNote } from "@/lib/medgemma";
 import DiffNoteView from "@/components/DiffNoteView";
 
-type TranscribeState =
+type GenerateState =
   | { status: "idle" }
-  | { status: "uploading" }
-  | { status: "transcribing" }
-  | { status: "analyzing" }
-  | { status: "done"; noteId: string; transcript: string; note: StructuredNote }
+  | { status: "generating" }
+  | { status: "done"; noteId: string; note: StructuredNote; priorText: string }
   | { status: "error"; message: string };
+
+type DiffLine = { type: "same" | "added" | "removed"; text: string };
+
+function normalizeNote(text: string): string {
+  return text
+    .replace(/\\n/g, "\n")     // literal \n → actual newline
+    .replace(/\r\n/g, "\n")    // CRLF → LF
+    .replace(/\r/g, "\n")      // CR → LF
+    .replace(/\xa0/g, " ")     // non-breaking space → regular space
+    .replace(/[ \t]+$/gm, ""); // strip trailing whitespace per line
+}
+
+function computeLineDiff(before: string, after: string): DiffLine[] {
+  const a = normalizeNote(before).split("\n");
+  const b = normalizeNote(after).split("\n");
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0) as number[]);
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = a[i-1] === b[j-1] ? dp[i-1][j-1] + 1 : Math.max(dp[i-1][j], dp[i][j-1]);
+  const result: DiffLine[] = [];
+  let i = m, j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && a[i-1] === b[j-1]) {
+      result.unshift({ type: "same", text: a[i-1] });
+      i--; j--;
+    } else if (j > 0 && (i === 0 || dp[i][j-1] >= dp[i-1][j])) {
+      result.unshift({ type: "added", text: b[j-1] });
+      j--;
+    } else {
+      result.unshift({ type: "removed", text: a[i-1] });
+      i--;
+    }
+  }
+  return result;
+}
+
+type TaskStatus = "pending" | "awaiting_result" | "done" | "carry_forward" | "resolved";
+interface HandoffItem { id: string; text: string; status: TaskStatus; createdAt?: number; }
+interface HandoffData { items: HandoffItem[]; note: string; }
+
+const STATUS_CYCLE: TaskStatus[] = ["pending", "done", "awaiting_result", "carry_forward"];
+const STATUS_ICON: Record<TaskStatus, string> = {
+  pending:        "radio_button_unchecked",
+  done:           "check_circle",
+  awaiting_result:"hourglass_empty",
+  carry_forward:  "arrow_forward",
+  resolved:       "cancel",
+};
+const STATUS_COLOR: Record<TaskStatus, string> = {
+  pending:        "var(--color-on-surface-variant)",
+  done:           "#16a34a",
+  awaiting_result:"var(--color-amber, #d97706)",
+  carry_forward:  "var(--color-primary)",
+  resolved:       "var(--color-outline)",
+};
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function migrateItem(raw: any): HandoffItem {
+  if (raw.status) return raw as HandoffItem;
+  return { id: raw.id, text: raw.text, status: raw.done ? "done" : "pending", createdAt: raw.createdAt } as HandoffItem;
+}
+
+function buildHandoffText(items: HandoffItem[], note: string): string {
+  const byStatus = (s: TaskStatus) => items.filter((i) => i.status === s && i.text.trim());
+  const sections: string[] = [];
+  const done     = byStatus("done");
+  const pending  = byStatus("pending");
+  const carry    = byStatus("carry_forward");
+  const awaiting = byStatus("awaiting_result");
+  if (done.length)     sections.push("Updated today:\n"              + done.map((i) => `- ${i.text}`).join("\n"));
+  if (pending.length)  sections.push("Still pending:\n"              + pending.map((i) => `- ${i.text}`).join("\n"));
+  if (carry.length)    sections.push("Carry forward to overnight:\n" + carry.map((i) => `- ${i.text}`).join("\n"));
+  if (awaiting.length) sections.push("Awaiting results:\n"           + awaiting.map((i) => `- ${i.text}`).join("\n"));
+  if (note.trim())     sections.push(note.trim());
+  return sections.join("\n\n");
+}
+
+// ---------------------------------------------------------------------------
+// Inline diff view
+// ---------------------------------------------------------------------------
+
+function LineDiffView({
+  before,
+  after,
+  onAccept,
+  copied,
+}: {
+  before: string;
+  after: string;
+  onAccept: (text: string) => void;
+  copied: boolean;
+}) {
+  const normBefore = normalizeNote(before);
+  const normAfter = normalizeNote(after);
+  const diff = computeLineDiff(normBefore, normAfter);
+  // toggled[i] = true means the line's default is flipped:
+  //   "added"   toggled → excluded from output
+  //   "removed" toggled → included in output
+  const [toggled, setToggled] = useState<Set<number>>(new Set());
+
+  const toggle = (i: number) =>
+    setToggled((prev) => { const s = new Set(prev); s.has(i) ? s.delete(i) : s.add(i); return s; });
+
+  const buildText = (t: Set<number>) =>
+    diff
+      .filter((l, i) => {
+        if (l.type === "same") return true;
+        if (l.type === "added") return !t.has(i);
+        return t.has(i); // removed: keep only if toggled back in
+      })
+      .map((l) => l.text)
+      .join("\n");
+
+  const addedCount = diff.filter((l, i) => l.type === "added" && !toggled.has(i)).length;
+  const removedCount = diff.filter((l, i) => l.type === "removed" && !toggled.has(i)).length;
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Summary bar */}
+      <div
+        className="flex items-center justify-between px-5 py-2.5 shrink-0"
+        style={{ borderBottom: "1px solid rgba(191,200,204,0.2)", backgroundColor: "#f8fafc" }}
+      >
+        <div className="flex items-center gap-3 text-[11px]">
+          {addedCount > 0 && (
+            <span className="flex items-center gap-1 font-semibold" style={{ color: "#16a34a" }}>
+              <span>+{addedCount}</span>
+            </span>
+          )}
+          {removedCount > 0 && (
+            <span className="flex items-center gap-1 font-semibold" style={{ color: "#dc2626" }}>
+              <span>−{removedCount}</span>
+            </span>
+          )}
+          {addedCount === 0 && removedCount === 0 && (
+            <span className="text-slate-400">No changes</span>
+          )}
+        </div>
+        <button
+          onClick={() => onAccept(buildText(toggled))}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-bold text-white transition-all active:scale-95"
+          style={{ backgroundColor: copied ? "#16a34a" : "var(--color-primary)" }}
+        >
+          <span className="material-symbols-outlined text-sm">{copied ? "check" : "content_copy"}</span>
+          {copied ? "Copied!" : "Accept & Copy"}
+        </button>
+      </div>
+
+      {/* Diff lines */}
+      <div className="flex-1 overflow-y-auto px-5 py-4 text-sm leading-relaxed" style={{ fontFamily: "var(--font-body)" }}>
+        {diff.map((line, i) => {
+          const isToggled = toggled.has(i);
+          if (line.type === "same") {
+            return (
+              <div key={i} className="py-0.5" style={{ color: "var(--color-on-surface)" }}>
+                {line.text || "\u00a0"}
+              </div>
+            );
+          }
+          if (line.type === "added") {
+            const excluded = isToggled;
+            return (
+              <div
+                key={i}
+                className="flex items-start gap-2 py-0.5 px-2 rounded group cursor-pointer"
+                style={{ backgroundColor: excluded ? "transparent" : "rgba(22,163,74,0.08)", color: excluded ? "#9ca3af" : "#15803d", textDecoration: excluded ? "line-through" : "none" }}
+                onClick={() => toggle(i)}
+                title={excluded ? "Click to include" : "Click to exclude"}
+              >
+                <span className="shrink-0 text-[10px] font-bold mt-0.5 w-3" style={{ color: excluded ? "#9ca3af" : "#16a34a" }}>+</span>
+                <span>{line.text || "\u00a0"}</span>
+              </div>
+            );
+          }
+          // removed
+          const kept = isToggled;
+          return (
+            <div
+              key={i}
+              className="flex items-start gap-2 py-0.5 px-2 rounded group cursor-pointer"
+              style={{ backgroundColor: kept ? "rgba(22,163,74,0.08)" : "rgba(220,38,38,0.06)", color: kept ? "#15803d" : "#b91c1c", textDecoration: kept ? "none" : "line-through" }}
+              onClick={() => toggle(i)}
+              title={kept ? "Click to remove" : "Click to keep"}
+            >
+              <span className="shrink-0 text-[10px] font-bold mt-0.5 w-3" style={{ color: kept ? "#16a34a" : "#dc2626" }}>−</span>
+              <span>{line.text || "\u00a0"}</span>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 export default function PatientDetailPage() {
   const router = useRouter();
@@ -51,13 +242,15 @@ export default function PatientDetailPage() {
 
   const editorRef = useRef<HTMLDivElement>(null);
 
-  const [transcribeState, setTranscribeState] = useState<TranscribeState>({ status: "idle" });
-  const [editableTranscript, setEditableTranscript] = useState<string>("");
+  const [generateState, setGenerateState] = useState<GenerateState>({ status: "idle" });
+  const [handoffItems, setHandoffItems] = useState<HandoffItem[]>([]);
+  const [handoffNote, setHandoffNote] = useState("");
+  const [pendingFocusId, setPendingFocusId] = useState<string | null>(null);
 
-  const [acceptedChanges, setAcceptedChanges] = useState<Set<string>>(new Set());
-  const [mobilePane, setMobilePane] = useState<"note" | "prior">("note");
+  const [mobilePane, setMobilePane] = useState<"prior" | "handoff" | "note">("prior");
   const [showNotifications, setShowNotifications] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [handoffCopied, setHandoffCopied] = useState(false);
   const [previousNote, setPreviousNote] = useState<string>(() => {
     if (isNewPatient) return "";
     return [
@@ -74,84 +267,29 @@ export default function PatientDetailPage() {
     ].join("\n");
   });
 
-  const recorder = useAudioRecorder();
-
-  const handleTranscribe = async () => {
-    if (!recorder.audioBlob) return;
-
-    setTranscribeState({ status: "uploading" });
-    const form = new FormData();
-    form.append("audio", recorder.audioBlob, "recording.webm");
-    form.append("patientId", patientId);
-    form.append("previousNote", priorEditorRef.current?.innerText ?? previousNote);
-    if (editableTranscript) form.append("transcript", editableTranscript);
-
-    let result: { noteId: string; transcript: string; note: StructuredNote };
+  const handleGenerate = async () => {
+    const priorText = priorEditorRef.current?.innerText ?? previousNote;
+    setGenerateState({ status: "generating" });
     try {
-      setTranscribeState({ status: "transcribing" });
-      const response = await fetch("/api/transcribe", { method: "POST", body: form });
-      if (!response.ok) {
-        const err = await response.json().catch(() => ({ error: response.statusText }));
-        throw new Error(err.error ?? response.statusText);
+      const res = await fetch(`/api/patients/${patientId}/generate-note`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          previousNote: priorText,
+          handoffItems: handoffItems.filter((i) => i.text.trim()),
+          handoffNote,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error((err as { error?: string }).error ?? res.statusText);
       }
-      setTranscribeState({ status: "analyzing" });
-      result = await response.json();
+      const result: { noteId: string; note: StructuredNote } = await res.json();
+      setGenerateState({ status: "done", ...result, priorText });
+      setMobilePane("note");
     } catch (err) {
-      setTranscribeState({ status: "error", message: (err as Error).message });
-      return;
+      setGenerateState({ status: "error", message: (err as Error).message });
     }
-
-    setTranscribeState({ status: "done", ...result });
-
-    // Auto-advance: update prior editor with the newly generated note so the next
-    // dictation session uses the freshest note as context (all formats, not just non-diff).
-    const advancedText = extractRawNoteText(result.note);
-    if (advancedText && priorEditorRef.current) {
-      isAutoLoading.current = true;
-      priorEditorRef.current.innerText = advancedText;
-      isAutoLoading.current = false;
-    }
-
-    // Only update the plain editor for non-diff formats (diff view manages its own display)
-    if (result.note.format !== "problem-diff") {
-      const editor = editorRef.current;
-      if (editor && result.note.rawText) {
-        editor.innerText = result.note.rawText;
-      }
-    }
-  };
-
-  // When recording stops, copy the captured transcript into the editable field
-  useEffect(() => {
-    if (!recorder.isRecording && recorder.transcript) {
-      setEditableTranscript(recorder.transcript);
-    }
-  }, [recorder.isRecording, recorder.transcript]);
-
-  // Auto-start recording if navigated with ?record=1
-  useEffect(() => {
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      if (params.get("record") === "1") {
-        recorder.start();
-        // Clean the query param from the URL without a page reload
-        window.history.replaceState({}, "", window.location.pathname);
-      }
-    }
-    // Only run on mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const toggleAccept = (id: string) => {
-    setAcceptedChanges((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) { next.delete(id); } else { next.add(id); }
-      return next;
-    });
-  };
-
-  const acceptAll = () => {
-    if (!isNewPatient) setAcceptedChanges(new Set(today.changes.map((c) => c.id)));
   };
 
   const priorEditorRef = useRef<HTMLDivElement>(null);
@@ -159,6 +297,7 @@ export default function PatientDetailPage() {
   // set innerText (auto-load on mount, auto-advance after generation).
   const isAutoLoading = useRef(false);
   const [priorSaveError, setPriorSaveError] = useState(false);
+  const [priorLoading, setPriorLoading] = useState(isNewPatient);
 
   // Populate prior editor on mount.
   // Gary Bailey demo: use static data. New patients: fetch latest note from DB.
@@ -194,6 +333,7 @@ export default function PatientDetailPage() {
       })
       .finally(() => {
         if (priorEditorRef.current) priorEditorRef.current.contentEditable = "true";
+        setPriorLoading(false);
       });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // run once on mount only
@@ -272,6 +412,72 @@ export default function PatientDetailPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // run once on mount only
 
+  // Load handoff from localStorage on mount
+  useEffect(() => {
+    try {
+      const all = JSON.parse(localStorage.getItem("rs-handoff") ?? "{}") as Record<string, HandoffData>;
+      const d = all[patientId] ?? { items: [], note: "" };
+      const items = d.items?.length ? d.items : [{ id: `h-${Date.now()}`, text: "", done: false }];
+      if (!isNewPatient) {
+        // Gary Bailey demo — pre-populated handoff items
+        setHandoffItems([
+          { id: "gb-1", text: "restart rivaroxaban today", status: "pending" },
+          { id: "gb-2", text: "titrate oxycodone to 10mg", status: "pending" },
+          { id: "gb-3", text: "hgb stable — no transfusion needed", status: "done" },
+        ]);
+      } else {
+        setHandoffItems(items.map(migrateItem));
+        setHandoffNote(d.note ?? "");
+      }
+    } catch {
+      setHandoffItems([{ id: `h-${Date.now()}`, text: "", status: "pending" }]);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Persist handoff back to localStorage (keeps dashboard in sync)
+  useEffect(() => {
+    if (!isNewPatient) return;
+    try {
+      const all = JSON.parse(localStorage.getItem("rs-handoff") ?? "{}") as Record<string, HandoffData>;
+      all[patientId] = { items: handoffItems, note: handoffNote };
+      localStorage.setItem("rs-handoff", JSON.stringify(all));
+    } catch {}
+  }, [handoffItems, handoffNote, patientId, isNewPatient]);
+
+  // Focus newly added checklist items
+  useEffect(() => {
+    if (!pendingFocusId) return;
+    document.getElementById(`hi-${pendingFocusId}`)?.focus();
+    setPendingFocusId(null);
+  }, [pendingFocusId]);
+
+  const cycleHandoffStatus = (id: string) =>
+    setHandoffItems((prev) => prev.map((i) => {
+      if (i.id !== id) return i;
+      const idx = STATUS_CYCLE.indexOf(i.status);
+      const next = STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length];
+      return { ...i, status: next };
+    }));
+
+  const updateHandoffItem = (id: string, text: string) =>
+    setHandoffItems((prev) => prev.map((i) => i.id === id ? { ...i, text } : i));
+
+  const addHandoffItem = (afterId?: string) => {
+    const newItem: HandoffItem = { id: `h-${Date.now()}-${Math.random()}`, text: "", status: "pending", createdAt: Date.now() };
+    setHandoffItems((prev) => {
+      if (!afterId) return [...prev, newItem];
+      const idx = prev.findIndex((i) => i.id === afterId);
+      const next = [...prev];
+      next.splice(idx + 1, 0, newItem);
+      return next;
+    });
+    setPendingFocusId(newItem.id);
+  };
+
+  const removeHandoffItem = (id: string) =>
+    setHandoffItems((prev) => prev.length > 1 ? prev.filter((i) => i.id !== id) : prev);
+
   const execFormat = (command: string, value?: string) => {
     document.execCommand(command, false, value);
   };
@@ -281,9 +487,14 @@ export default function PatientDetailPage() {
     if (url) execFormat("createLink", url);
   };
 
-  const handleCopy = async () => {
-    const text = editorRef.current?.innerText ?? "";
-    await navigator.clipboard.writeText(text);
+  const handleCopy = async (text?: string) => {
+    const content = text ?? (generateState.status === "done" ? generateState.note.rawText : editorRef.current?.innerText ?? "");
+    await navigator.clipboard.writeText(content);
+    if (generateState.status === "done" && priorEditorRef.current) {
+      isAutoLoading.current = true;
+      priorEditorRef.current.innerText = content;
+      isAutoLoading.current = false;
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -430,22 +641,25 @@ export default function PatientDetailPage() {
           </div>
 
           {/* Mobile segmented tabs */}
-          <div className="md:hidden px-4 pb-3">
+          <div className="lg:hidden px-4 pb-3">
             <div className="flex rounded-xl p-1" style={{ backgroundColor: "#f1f3f4" }}>
-              {[
-                { key: "note", label: "Updated Note" },
+              {([
                 { key: "prior", label: "Prior Note" },
-              ].map((t) => {
-                const active = mobilePane === (t.key as "note" | "prior");
+                { key: "handoff", label: "Handoff" },
+                { key: "note", label: "Note", disabled: generateState.status === "idle" },
+              ] as { key: "prior"|"handoff"|"note"; label: string; disabled?: boolean }[]).map((t) => {
+                const active = mobilePane === t.key;
                 return (
                   <button
                     key={t.key}
-                    onClick={() => setMobilePane(t.key as "note" | "prior")}
+                    onClick={() => !t.disabled && setMobilePane(t.key)}
                     className="flex-1 py-2 rounded-lg text-sm font-semibold transition-all"
                     style={
-                      active
-                        ? { backgroundColor: "white", color: "var(--color-on-surface)", boxShadow: "0 1px 3px rgba(0,0,0,0.12)" }
-                        : { color: "var(--color-on-surface-variant)" }
+                      t.disabled
+                        ? { color: "var(--color-on-surface-variant)", opacity: 0.35 }
+                        : active
+                          ? { backgroundColor: "white", color: "var(--color-on-surface)", boxShadow: "0 1px 3px rgba(0,0,0,0.12)" }
+                          : { color: "var(--color-on-surface-variant)" }
                     }
                   >
                     {t.label}
@@ -460,14 +674,15 @@ export default function PatientDetailPage() {
         <div className="flex-1 overflow-hidden px-0 py-0 pb-20 md:px-8 md:py-6 md:pb-6">
 
           <div
-            className="flex flex-col h-full gap-0 md:gap-4 md:grid"
+            className="flex flex-col h-full gap-0 lg:gap-4 lg:grid"
             style={{
               gridTemplateColumns: "5fr 7fr",
             }}
           >
             {/* Column 1: Prior Note (paste area) */}
             <div
-              className={`${mobilePane === "prior" ? "flex" : "hidden"} md:flex flex-col flex-1 md:rounded-xl overflow-hidden md:shadow-sm`}
+              className={`${mobilePane === "prior" ? "flex" : "hidden"} lg:flex flex-col flex-1 lg:rounded-xl overflow-hidden lg:shadow-sm`}
+
               style={{
                 backgroundColor: "var(--color-surface-container-low)",
                 border: "none",
@@ -542,456 +757,233 @@ export default function PatientDetailPage() {
                 </button>
               </div>
               {/* Editable area — always mounted, never swapped */}
-              <div
-                ref={priorEditorRef}
-                className="prior-editor flex-1 px-5 py-5 md:p-6 text-sm md:text-xs leading-relaxed overflow-y-auto focus:outline-none"
-                style={{ fontFamily: "var(--font-body)", color: "rgba(63,72,76,0.8)", backgroundColor: "transparent" }}
-                contentEditable
-                suppressContentEditableWarning
-                data-placeholder="Paste yesterday's note here to get started"
-              />
+              <div className="relative flex-1 overflow-hidden">
+                {priorLoading && (
+                  <div className="absolute inset-0 flex items-center justify-center gap-2 text-xs" style={{ color: "var(--color-on-surface-variant)" }}>
+                    <span className="material-symbols-outlined text-sm animate-spin" style={{ animationDuration: "1s" }}>progress_activity</span>
+                    Loading prior note…
+                  </div>
+                )}
+                <div
+                  ref={priorEditorRef}
+                  className="prior-editor h-full px-5 py-5 md:p-6 text-sm md:text-xs leading-relaxed overflow-y-auto focus:outline-none"
+                  style={{ fontFamily: "var(--font-body)", color: priorLoading ? "transparent" : "rgba(63,72,76,0.8)", backgroundColor: "transparent" }}
+                  contentEditable
+                  suppressContentEditableWarning
+                  data-placeholder="Paste yesterday's note here to get started"
+                />
+              </div>
               {priorSaveError && (
                 <p className="px-5 pb-2 text-xs text-red-600">Couldn&apos;t save — check connection</p>
               )}
             </div>
 
-            {/* Column 2: Updated Note (Generated / Editor) */}
+            {/* Column 2: Handoff (State A) or Generated Note (State B) */}
             <div
-              className={`${mobilePane === "note" ? "flex" : "hidden"} md:flex flex-col flex-1 md:rounded-xl overflow-hidden md:shadow-md relative`}
-              style={{
-                backgroundColor: "white",
-                border: "none",
-                outline: recorder.isRecording ? "1px solid rgba(220,38,38,0.4)" : undefined,
-                transition: "outline-color 0.3s",
-              }}
+              className={`${mobilePane === "handoff" || mobilePane === "note" ? "flex" : "hidden"} lg:flex flex-col flex-1 lg:rounded-xl overflow-hidden lg:shadow-md relative`}
+              style={{ backgroundColor: "white", border: "none" }}
             >
-              {/* Action bar */}
-              <div
-                className="px-5 py-3 md:px-6 md:py-4 bg-white flex items-center justify-between shrink-0"
-                style={{ borderBottom: "1px solid rgba(191,200,204,0.2)" }}
-              >
-                {/* Mobile: "Note" heading */}
-                <span className="md:hidden font-bold text-base" style={{ color: "var(--color-on-surface)" }}>Note</span>
-                {/* Desktop: label + draft info */}
-                <div className="hidden md:flex items-center gap-4">
-                  <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: "#64748b" }}>
-                    Updated Note (Today&apos;s Rounds)
-                  </span>
-                  <div className="flex items-center gap-1" style={{ color: "#94a3b8" }}>
-                    <span className="material-symbols-outlined" style={{ fontSize: "14px" }}>info</span>
-                    <span className="text-[9px] font-semibold italic">Draft saved 1m ago</span>
-                  </div>
-                </div>
-                <div className="flex items-center gap-2 md:gap-3">
-                  <button
-                    onClick={acceptAll}
-                    className="flex items-center gap-1 px-2 py-1.5 rounded-md transition-all hover:bg-slate-50"
-                    style={{ color: "var(--color-primary)" }}
-                    title="Accept all changes"
+              {/* State A — Handoff panel (before generation) */}
+              {generateState.status !== "done" && (
+                <>
+                  {/* Header */}
+                  <div
+                    className="px-5 py-3 md:px-6 md:py-4 bg-white flex items-center justify-between shrink-0"
+                    style={{ borderBottom: "1px solid rgba(191,200,204,0.2)" }}
                   >
-                    <span className="material-symbols-outlined text-base">task_alt</span>
-                    <span className="hidden md:inline text-[10px] font-bold">Accept All</span>
-                  </button>
-                  {/* Mobile: Edit button (pencil + text like OpenEvidence) */}
-                  <button
-                    onClick={() => editorRef.current?.focus()}
-                    className="md:hidden flex items-center gap-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition-all"
-                    style={{
-                      border: "1px solid rgba(191,200,204,0.5)",
-                      color: "var(--color-on-surface)",
-                      backgroundColor: "white",
-                    }}
-                  >
-                    <span className="material-symbols-outlined text-sm">edit</span>
-                    Edit
-                  </button>
-                  {/* Desktop: Copy to EHR */}
-                  <button
-                    onClick={handleCopy}
-                    className="hidden md:flex items-center gap-1 px-2.5 py-1.5 rounded-md transition-all text-slate-600 hover:bg-slate-100"
-                    title={copied ? "Copied!" : "Copy note to clipboard"}
-                  >
-                    <span className="material-symbols-outlined text-base">{copied ? "check" : "content_copy"}</span>
-                    <span className="text-[10px] font-bold">{copied ? "Copied!" : "Copy to EHR"}</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Recording banner — desktop only (mobile uses bottom bar) */}
-              {(recorder.isRecording || recorder.audioUrl) && (
-                <div
-                  className="hidden md:flex px-6 py-3 items-center justify-between shrink-0"
-                  style={{
-                    backgroundColor: recorder.isRecording ? "rgba(220,38,38,0.06)" : "rgba(0,95,115,0.06)",
-                    borderBottom: "1px solid rgba(191,200,204,0.2)",
-                  }}
-                >
-                  {recorder.isRecording ? (
-                    <>
-                      <div className="flex items-center gap-3">
-                        <span className="relative flex h-2.5 w-2.5">
-                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75" />
-                          <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-red-500" />
-                        </span>
-                        <span className="text-[11px] font-bold text-red-600 tracking-wide">Recording</span>
-                        <span className="text-[11px] font-mono font-bold" style={{ color: "var(--color-on-surface-variant)" }}>
-                          {formatDuration(recorder.duration)}
-                        </span>
-                      </div>
-                      <button
-                        onClick={recorder.stop}
-                        className="flex items-center gap-1.5 px-3 py-1 rounded text-[10px] font-bold text-white transition-all active:scale-95"
-                        style={{ backgroundColor: "#dc2626" }}
-                      >
-                        <span className="material-symbols-outlined text-sm">stop</span>
-                        Stop
-                      </button>
-                    </>
-                  ) : (
-                    <>
-                      <div className="flex items-center gap-3">
-                        <span className="material-symbols-outlined text-sm" style={{ color: "var(--color-primary)" }}>check_circle</span>
-                        <span className="text-[11px] font-bold" style={{ color: "var(--color-primary)" }}>
-                          Recording saved — {formatDuration(recorder.duration)}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={handleTranscribe}
-                          disabled={
-                            transcribeState.status === "uploading" ||
-                            transcribeState.status === "transcribing" ||
-                            transcribeState.status === "analyzing"
-                          }
-                          className="flex items-center gap-1.5 px-3 py-1 rounded text-[10px] font-bold text-white transition-all active:scale-95 disabled:opacity-50"
-                          style={{ backgroundColor: "var(--color-primary)" }}
+                    <div className="flex items-center gap-3">
+                      <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: "#64748b" }}>
+                        Today&apos;s Handoff
+                      </span>
+                      {handoffItems.filter((i) => i.text.trim()).length > 0 && (
+                        <span
+                          className="text-[10px] font-bold px-1.5 py-0.5 rounded-full"
+                          style={{ backgroundColor: "var(--color-primary-container)", color: "var(--color-primary)" }}
                         >
-                          <span className="material-symbols-outlined text-sm">auto_awesome</span>
-                          {transcribeState.status === "uploading"
-                            ? "Uploading…"
-                            : transcribeState.status === "transcribing"
-                              ? "Transcribing…"
-                              : transcribeState.status === "analyzing"
-                                ? "Analyzing…"
-                                : "Analyze"}
-                        </button>
-                        <button
-                          onClick={() => { recorder.clear(); setEditableTranscript(""); setTranscribeState({ status: "idle" }); }}
-                          className="p-1 rounded hover:bg-slate-100 transition-colors"
-                          title="Discard recording"
-                          style={{ color: "var(--color-on-surface-variant)" }}
-                        >
-                          <span className="material-symbols-outlined text-base">delete</span>
-                        </button>
-                      </div>
-                    </>
-                  )}
-                </div>
-              )}
-
-              {/* Live transcript preview — while recording */}
-              {recorder.isRecording && (
-                <div
-                  className="hidden md:block px-6 py-3 shrink-0"
-                  style={{ borderBottom: "1px solid rgba(191,200,204,0.2)", backgroundColor: "rgba(220,38,38,0.03)" }}
-                >
-                  <p className="text-[9px] font-bold uppercase tracking-widest mb-1.5" style={{ color: "#dc2626" }}>
-                    Live Transcript
-                  </p>
-                  <p className="text-[12px] leading-relaxed min-h-[1.5rem]" style={{ color: "var(--color-on-surface-variant)", fontFamily: "var(--font-body)" }}>
-                    {recorder.liveTranscript || <span className="italic opacity-40">Listening…</span>}
-                  </p>
-                </div>
-              )}
-
-              {/* Editable transcript review — after recording stops, before Analyze */}
-              {!recorder.isRecording && recorder.audioUrl && transcribeState.status === "idle" && (
-                <div
-                  className="hidden md:block px-6 py-4 shrink-0"
-                  style={{ borderBottom: "1px solid rgba(191,200,204,0.2)", backgroundColor: "#fafaf8" }}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <p className="text-[9px] font-bold uppercase tracking-widest" style={{ color: "var(--color-on-surface-variant)" }}>
-                      Transcript — Review &amp; Edit Before Analyzing
-                    </p>
-                    {editableTranscript && (
-                      <button
-                        onClick={() => setEditableTranscript("")}
-                        className="text-[9px] font-medium hover:underline"
-                        style={{ color: "var(--color-outline)" }}
-                      >
-                        Clear
-                      </button>
+                          {handoffItems.filter((i) => i.text.trim()).length}
+                        </span>
+                      )}
+                    </div>
+                    {generateState.status === "error" && (
+                      <span className="text-[10px] text-red-600 font-medium max-w-[200px] truncate">{generateState.message}</span>
                     )}
                   </div>
-                  <textarea
-                    value={editableTranscript}
-                    onChange={(e) => setEditableTranscript(e.target.value)}
-                    placeholder="No transcript captured — you can type or paste the rounding discussion here before analyzing."
-                    rows={4}
-                    className="w-full resize-none rounded-md px-3 py-2 text-[12px] leading-relaxed focus:outline-none"
-                    style={{
-                      border: "1px solid rgba(191,200,204,0.5)",
-                      backgroundColor: "white",
-                      color: "var(--color-on-surface)",
-                      fontFamily: "var(--font-body)",
-                    }}
-                  />
-                </div>
-              )}
 
-              {/* Transcription result banner — desktop only */}
-              {transcribeState.status === "done" && (
-                <div
-                  className="hidden md:flex px-6 py-2 items-center gap-2 text-[11px] font-medium shrink-0"
-                  style={{
-                    backgroundColor: "rgba(0,95,115,0.06)",
-                    color: "var(--color-primary)",
-                    borderBottom: "1px solid rgba(0,95,115,0.15)",
-                  }}
-                >
-                  <span className="material-symbols-outlined text-sm">auto_awesome</span>
-                  {transcribeState.note.format === "problem-diff"
-                    ? "Changes ready to review — accept or decline each update below."
-                    : "Note generated and inserted into editor."}
-                  <span className="ml-auto font-mono opacity-60 text-[9px]">
-                    id:{transcribeState.noteId.slice(0, 8)}
-                  </span>
-                </div>
-              )}
+                  {/* Warning if no prior note */}
+                  {!(priorEditorRef.current?.innerText?.trim() || previousNote.trim()) && (
+                    <div
+                      className="hidden md:flex px-6 py-2 items-center gap-2 text-[11px] shrink-0"
+                      style={{ backgroundColor: "rgba(217,119,6,0.06)", color: "#b45309", borderBottom: "1px solid rgba(217,119,6,0.15)" }}
+                    >
+                      <span className="material-symbols-outlined text-sm">warning</span>
+                      No prior note loaded — note will be generated from handoff only
+                    </div>
+                  )}
 
-              {/* Transcription error banner — desktop only (mobile error shown in bottom bar) */}
-              {transcribeState.status === "error" && (
-                <div
-                  className="hidden md:flex px-6 py-2 items-center gap-2 text-[11px] font-medium shrink-0"
-                  style={{
-                    backgroundColor: "rgba(220,38,38,0.06)",
-                    color: "#dc2626",
-                    borderBottom: "1px solid rgba(220,38,38,0.2)",
-                  }}
-                >
-                  <span className="material-symbols-outlined text-sm">error</span>
-                  {transcribeState.message}
-                  <button
-                    onClick={() => setTranscribeState({ status: "idle" })}
-                    className="ml-auto text-[9px] underline"
+                  {/* Checklist + free text */}
+                  <div className="flex-1 overflow-y-auto p-5 md:p-6 flex flex-col gap-4">
+                    <div className="space-y-1">
+                      {handoffItems.map((item, idx) => (
+                        <div key={item.id} className="flex items-center gap-2 py-0.5 group">
+                          <button
+                            onClick={() => cycleHandoffStatus(item.id)}
+                            title={`Status: ${item.status} — tap to cycle`}
+                            className="shrink-0 min-w-[44px] min-h-[44px] flex items-center justify-center rounded-full transition-colors hover:bg-slate-100"
+                            style={{ color: STATUS_COLOR[item.status] }}
+                          >
+                            <span className="material-symbols-outlined text-lg" style={{ fontVariationSettings: "'FILL' 1" }}>
+                              {STATUS_ICON[item.status]}
+                            </span>
+                          </button>
+                          <input
+                            id={`hi-${item.id}`}
+                            type="text"
+                            value={item.text}
+                            onChange={(e) => updateHandoffItem(item.id, e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") { e.preventDefault(); addHandoffItem(item.id); }
+                              if (e.key === "Backspace" && item.text === "") { e.preventDefault(); removeHandoffItem(item.id); }
+                            }}
+                            placeholder={idx === 0 ? "Add task..." : ""}
+                            className="flex-1 bg-transparent text-sm focus:outline-none min-h-[36px]"
+                            style={{
+                              color: item.status === "done" || item.status === "resolved"
+                                ? "var(--color-on-surface-variant)"
+                                : "var(--color-on-surface)",
+                              textDecoration: item.status === "resolved" ? "line-through" : "none",
+                            }}
+                          />
+                          <span
+                            className="text-[9px] font-bold uppercase tracking-wider shrink-0 hidden md:block"
+                            style={{ color: STATUS_COLOR[item.status], minWidth: 60 }}
+                          >
+                            {item.status.replace("_", " ")}
+                          </span>
+                          <button
+                            onClick={() => removeHandoffItem(item.id)}
+                            className="opacity-0 group-hover:opacity-100 p-1 rounded transition-opacity shrink-0"
+                            style={{ color: "var(--color-outline)" }}
+                          >
+                            <span className="material-symbols-outlined text-sm">close</span>
+                          </button>
+                        </div>
+                      ))}
+                      <button
+                        onClick={() => addHandoffItem()}
+                        className="flex items-center gap-1.5 mt-1 text-xs transition-opacity hover:opacity-70"
+                        style={{ color: "var(--color-primary)" }}
+                      >
+                        <span className="material-symbols-outlined text-sm">add</span>
+                        Add task
+                      </button>
+                    </div>
+
+                    <div style={{ borderTop: "1px solid rgba(191,200,204,0.3)" }} className="pt-4">
+                      <p className="text-[10px] font-bold uppercase tracking-widest mb-2" style={{ color: "var(--color-on-surface-variant)" }}>
+                        Additional notes
+                      </p>
+                      <textarea
+                        value={handoffNote}
+                        onChange={(e) => setHandoffNote(e.target.value)}
+                        placeholder="Free text notes..."
+                        rows={4}
+                        className="w-full bg-transparent text-sm focus:outline-none resize-none"
+                        style={{ color: "var(--color-on-surface)" }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Generate button row */}
+                  <div
+                    className="hidden md:flex px-6 py-4 shrink-0 items-center gap-3"
+                    style={{ borderTop: "1px solid rgba(191,200,204,0.2)" }}
                   >
-                    Dismiss
-                  </button>
-                </div>
-              )}
-
-              {/* Microphone error banner — desktop only */}
-              {recorder.error && (
-                <div
-                  className="hidden md:flex px-6 py-2 items-center gap-2 text-[11px] font-medium shrink-0"
-                  style={{ backgroundColor: "rgba(220,38,38,0.06)", color: "#dc2626", borderBottom: "1px solid rgba(220,38,38,0.2)" }}
-                >
-                  <span className="material-symbols-outlined text-sm">error</span>
-                  {recorder.error}
-                </div>
-              )}
-
-              {/* Document container */}
-              <div className="flex-1 p-0 md:p-6 overflow-hidden flex flex-col">
-                {/* Diff view — shown when Claude returns structured changes */}
-                {transcribeState.status === "done" && transcribeState.note.format === "problem-diff" && (
-                  <div className="flex-1 overflow-hidden flex flex-col md:bg-white md:rounded-lg md:shadow-sm">
-                    <DiffNoteView
-                      note={transcribeState.note}
-                      onCopy={async (text) => {
+                    {generateState.status === "error" && (
+                      <p className="text-xs text-red-600 flex-1">{generateState.message}</p>
+                    )}
+                    {/* Generate Handoff */}
+                    <button
+                      onClick={async () => {
+                        const text = buildHandoffText(handoffItems, handoffNote);
+                        if (!text.trim()) return;
                         await navigator.clipboard.writeText(text);
-                        setPreviousNote(text);
-                        setCopied(true);
-                        setTimeout(() => setCopied(false), 2000);
+                        setHandoffCopied(true);
+                        setTimeout(() => setHandoffCopied(false), 2000);
                       }}
+                      disabled={!handoffItems.some((i) => i.text.trim()) && !handoffNote.trim()}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-bold transition-all active:scale-95 disabled:opacity-40"
+                      style={{ color: "var(--color-primary)", border: "1px solid var(--color-primary)" }}
+                    >
+                      <span className="material-symbols-outlined text-sm">{handoffCopied ? "check" : "content_copy"}</span>
+                      {handoffCopied ? "Copied!" : "Copy Handoff"}
+                    </button>
+                    {/* Generate Progress Note */}
+                    <button
+                      onClick={handleGenerate}
+                      disabled={generateState.status === "generating" || (!handoffItems.some((i) => i.text.trim()) && !handoffNote.trim())}
+                      className="ml-auto flex items-center gap-2 px-5 py-2.5 rounded-lg text-sm font-bold text-white transition-all active:scale-95 disabled:opacity-50"
+                      style={{ backgroundColor: "var(--color-primary)" }}
+                    >
+                      {generateState.status === "generating" ? (
+                        <>
+                          <span className="material-symbols-outlined text-base animate-spin">autorenew</span>
+                          Generating…
+                        </>
+                      ) : (
+                        <>
+                          <span className="material-symbols-outlined text-base">auto_awesome</span>
+                          Generate Progress Note
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {/* State B — Generated note */}
+              {generateState.status === "done" && (
+                <>
+                  {/* Header */}
+                  <div
+                    className="px-5 py-3 md:px-6 md:py-4 bg-white flex items-center justify-between shrink-0"
+                    style={{ borderBottom: "1px solid rgba(191,200,204,0.2)" }}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-[10px] font-bold uppercase tracking-widest" style={{ color: "#64748b" }}>
+                        Generated Note
+                      </span>
+                      <span className="text-[9px] font-mono opacity-40">id:{generateState.noteId.slice(0, 8)}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => setGenerateState({ status: "idle" })}
+                        className="hidden md:flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[10px] font-bold transition-all hover:bg-slate-50"
+                        style={{ color: "var(--color-on-surface-variant)" }}
+                      >
+                        <span className="material-symbols-outlined text-sm">arrow_back</span>
+                        Revise Handoff
+                      </button>
+                      <button
+                        onClick={() => { void handleCopy(generateState.status === "done" ? generateState.note.rawText : undefined); }}
+                        className="hidden md:flex items-center gap-1 px-2.5 py-1.5 rounded-md transition-all text-slate-600 hover:bg-slate-100"
+                      >
+                        <span className="material-symbols-outlined text-base">{copied ? "check" : "content_copy"}</span>
+                        <span className="text-[10px] font-bold">{copied ? "Copied!" : "Copy to EHR"}</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Generated note content — inline diff view */}
+                  <div className="flex-1 overflow-hidden flex flex-col">
+                    <LineDiffView
+                      before={generateState.priorText}
+                      after={generateState.note.rawText ?? ""}
+                      onAccept={(text) => handleCopy(text)}
+                      copied={copied}
                     />
                   </div>
-                )}
-
-                {/* Editor toolbar + content — hidden when showing diff view */}
-                {!(transcribeState.status === "done" && transcribeState.note.format === "problem-diff") && (<>
-                <div
-                  className="hidden md:flex items-center gap-1 px-4 py-2 bg-white rounded-t-lg"
-                  style={{ border: "1px solid rgba(191,200,204,0.3)", borderBottom: "none" }}
-                >
-                  {[
-                    { icon: "undo", title: "Undo", cmd: "undo" },
-                    { icon: "redo", title: "Redo", cmd: "redo" },
-                  ].map(({ icon, title, cmd }) => (
-                    <button
-                      key={icon}
-                      title={title}
-                      onClick={() => execFormat(cmd)}
-                      className="p-1.5 hover:bg-slate-100 rounded text-slate-600 transition-colors"
-                    >
-                      <span className="material-symbols-outlined text-lg">{icon}</span>
-                    </button>
-                  ))}
-                  <div className="h-4 w-px bg-slate-200 mx-1" />
-                  {[
-                    { icon: "format_bold", title: "Bold", cmd: "bold" },
-                    { icon: "format_italic", title: "Italic", cmd: "italic" },
-                    { icon: "format_underlined", title: "Underline", cmd: "underline" },
-                  ].map(({ icon, title, cmd }) => (
-                    <button
-                      key={icon}
-                      title={title}
-                      onClick={() => execFormat(cmd)}
-                      className="p-1.5 hover:bg-slate-100 rounded text-slate-600 transition-colors"
-                    >
-                      <span className="material-symbols-outlined text-lg">{icon}</span>
-                    </button>
-                  ))}
-                  <div className="h-4 w-px bg-slate-200 mx-1" />
-                  {[
-                    { icon: "format_list_bulleted", title: "Bulleted List", cmd: "insertUnorderedList" },
-                    { icon: "format_list_numbered", title: "Numbered List", cmd: "insertOrderedList" },
-                  ].map(({ icon, title, cmd }) => (
-                    <button
-                      key={icon}
-                      title={title}
-                      onClick={() => execFormat(cmd)}
-                      className="p-1.5 hover:bg-slate-100 rounded text-slate-600 transition-colors"
-                    >
-                      <span className="material-symbols-outlined text-lg">{icon}</span>
-                    </button>
-                  ))}
-                  <div className="h-4 w-px bg-slate-200 mx-1" />
-                  <button
-                    title="Insert Link"
-                    onClick={handleLink}
-                    className="p-1.5 hover:bg-slate-100 rounded text-slate-600 transition-colors"
-                  >
-                    <span className="material-symbols-outlined text-lg">link</span>
-                  </button>
-                  <div className="ml-auto text-[10px] font-medium text-slate-400 px-2">Arial · 11pt</div>
-                </div>
-
-                {/* Editable content area */}
-                <div
-                  className="flex-1 md:bg-white md:rounded-b-lg md:shadow-sm overflow-hidden flex flex-col"
-                  style={{ border: "none", borderTop: undefined }}
-                >
-                  <div
-                    ref={editorRef}
-                    className="px-5 py-5 md:p-8 text-sm md:text-sm leading-relaxed overflow-y-auto flex-1"
-                    style={{ fontFamily: "var(--font-body)", color: "var(--color-on-surface)", outline: "none" }}
-                    contentEditable
-                    suppressContentEditableWarning
-                  >
-                    {isNewPatient ? (
-                      /* New patient — no note yet */
-                      <div className="flex flex-col items-center justify-center h-full min-h-[300px] text-center px-4" contentEditable={false}>
-                        <span className="material-symbols-outlined mb-4" style={{ fontSize: "48px", color: "var(--color-outline)" }}>mic_none</span>
-                        <p className="text-base font-semibold mb-1" style={{ fontFamily: "var(--font-headline)", color: "var(--color-on-surface)" }}>
-                          No note yet
-                        </p>
-                        <p className="text-sm" style={{ color: "var(--color-on-surface-variant)" }}>
-                          Record today&apos;s rounding discussion to generate the first note for {displayName}.
-                        </p>
-                      </div>
-                    ) : (
-                      <>
-                        {/* Patient metadata block (matches OpenEvidence style) */}
-                        <div className="mb-6 text-sm leading-7" style={{ color: "var(--color-on-surface-variant)" }}>
-                          <p>Date &amp; Time: {yesterday.date}</p>
-                          <p>Patient: {displayName}</p>
-                          <p>Room: {displayRoom} · MRN: {displayMrn}</p>
-                          <p>DOB: {displayDob}{displayAge ? ` · ${displayAge} Y.O. ${displaySex}` : ""}</p>
-                          <p>Author / Clinician: D. Miller, MD</p>
-                        </div>
-                        <div className="mb-6">
-                          <h4 className="font-bold text-black mb-2">Subjective</h4>
-                          <p>{today.subjective}</p>
-                        </div>
-                        <h4 className="font-bold text-black mb-3">Assessment &amp; Plan</h4>
-                        {today.changes.map((change) => {
-                          const accepted = acceptedChanges.has(change.id);
-                          return (
-                            <div key={change.id} className="mb-6 group relative">
-                              <div className="flex justify-between items-start">
-                                <div className="flex-1">
-                                  <span className="font-bold block mb-1">#{change.label}:</span>
-                                  {change.prefix}
-                                  {accepted ? (
-                                    <span className="diff-addition">{change.addition}</span>
-                                  ) : (
-                                    <>
-                                      <span className="diff-deletion">{change.deletion}</span>
-                                      <span className="diff-addition">{change.addition}</span>
-                                    </>
-                                  )}
-                                  {change.suffix}
-                                </div>
-                                <button
-                                  onClick={() => toggleAccept(change.id)}
-                                  contentEditable={false}
-                                  className="accept-btn p-1.5 rounded-full ml-4 shrink-0 transition-colors"
-                                  style={{ color: "var(--color-tertiary-container)" }}
-                                  title={accepted ? "Undo" : "Accept this change"}
-                                >
-                                  <span className="material-symbols-outlined text-xl font-bold">
-                                    {accepted ? "undo" : "check"}
-                                  </span>
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                        <div className="mt-8">
-                          <h4 className="font-bold text-black mb-2">Social</h4>
-                          <p>{today.social}</p>
-                        </div>
-                      </>
-                    )}
-                  </div>
-                </div>
-                </>)}
-              </div>
-
-              {/* Diff legend footer — desktop only (hidden when showing diff view) */}
-              {!(transcribeState.status === "done" && transcribeState.note.format === "problem-diff") && (
-              <div
-                className="hidden md:flex px-6 py-3 bg-white gap-4 shrink-0"
-                style={{ borderTop: "1px solid rgba(191,200,204,0.2)" }}
-              >
-                <div className="flex items-center gap-1.5">
-                  <div className="w-3 h-3 bg-green-100 border border-green-200 rounded-sm" />
-                  <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "var(--color-on-surface-variant)" }}>
-                    Added
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <div className="w-3 h-3 bg-red-100 border border-red-200 rounded-sm relative overflow-hidden flex items-center justify-center">
-                    <div className="w-full h-px bg-red-400" />
-                  </div>
-                  <span className="text-[9px] font-bold uppercase tracking-wider" style={{ color: "var(--color-on-surface-variant)" }}>
-                    Deleted
-                  </span>
-                </div>
-              </div>
+                </>
               )}
-
-              {/* Desktop-only floating mic FAB */}
-              <button
-                onClick={recorder.toggle}
-                className="hidden md:flex absolute bottom-20 right-8 w-14 h-14 text-white rounded-full shadow-lg items-center justify-center transition-all active:scale-95 z-20"
-                style={{
-                  backgroundColor: recorder.isRecording ? "#dc2626" : "#005F73",
-                  boxShadow: recorder.isRecording
-                    ? "0 0 0 6px rgba(220,38,38,0.2), 0 4px 12px rgba(220,38,38,0.3)"
-                    : undefined,
-                }}
-                title={recorder.isRecording ? "Stop recording" : "Start voice edit"}
-              >
-                <span
-                  className="material-symbols-outlined text-2xl"
-                  style={recorder.isRecording ? { fontVariationSettings: "'FILL' 1" } : {}}
-                >
-                  {recorder.isRecording ? "stop_circle" : "mic"}
-                </span>
-              </button>
             </div>
 
           </div>
@@ -1006,62 +998,45 @@ export default function PatientDetailPage() {
             paddingBottom: "max(12px, env(safe-area-inset-bottom))",
           }}
         >
-          {/* Primary CTA: Record → Stop → Transcribe → based on state */}
-          {recorder.isRecording ? (
-            <button
-              onClick={recorder.stop}
-              className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-2xl text-sm font-bold text-white"
-              style={{ backgroundColor: "#dc2626" }}
-            >
-              <span className="material-symbols-outlined text-base">stop</span>
-              Stop · {formatDuration(recorder.duration)}
-            </button>
-          ) : recorder.audioBlob ? (
-            <button
-              onClick={handleTranscribe}
-              disabled={transcribeState.status === "uploading" || transcribeState.status === "transcribing" || transcribeState.status === "analyzing"}
-              className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-2xl text-sm font-bold text-white disabled:opacity-60"
-              style={{ backgroundColor: "var(--color-primary)" }}
-            >
-              <span className="material-symbols-outlined text-base">auto_awesome</span>
-              {transcribeState.status === "uploading"
-                ? "Uploading…"
-                : transcribeState.status === "transcribing"
-                  ? "Transcribing…"
-                  : transcribeState.status === "analyzing"
-                    ? "Analyzing…"
-                    : "Transcribe →"}
-            </button>
-          ) : (
-            <button
-              onClick={recorder.start}
-              className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-2xl text-sm font-bold text-white"
-              style={{ backgroundColor: "var(--color-primary)" }}
-            >
-              <span className="material-symbols-outlined text-base">mic</span>
-              Record →
-            </button>
-          )}
-
-          {/* Secondary: Copy note */}
-          <button
-            onClick={handleCopy}
-            className="flex items-center gap-2 px-5 py-3.5 rounded-2xl text-sm font-semibold transition-all"
-            style={{ backgroundColor: "#f1f3f4", color: "var(--color-on-surface)" }}
-          >
-            <span className="material-symbols-outlined text-base">{copied ? "check" : "content_copy"}</span>
-            {copied ? "Copied" : "Copy note"}
-          </button>
-
           {/* Error message */}
-          {transcribeState.status === "error" && (
+          {generateState.status === "error" && (
             <div
               className="absolute left-4 right-4 -top-8 text-[11px] font-medium text-center py-1.5 rounded-lg"
               style={{ backgroundColor: "rgba(220,38,38,0.1)", color: "#dc2626" }}
             >
-              {transcribeState.message}
+              {generateState.message}
             </div>
           )}
+
+          {mobilePane === "handoff" ? (
+            <button
+              onClick={handleGenerate}
+              disabled={generateState.status === "generating"}
+              className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-2xl text-sm font-bold text-white disabled:opacity-60"
+              style={{ backgroundColor: "var(--color-primary)" }}
+            >
+              {generateState.status === "generating" ? (
+                <>
+                  <span className="material-symbols-outlined text-base animate-spin">progress_activity</span>
+                  Generating…
+                </>
+              ) : (
+                <>
+                  <span className="material-symbols-outlined text-base">auto_awesome</span>
+                  Generate Progress Note
+                </>
+              )}
+            </button>
+          ) : mobilePane === "note" && generateState.status === "done" ? (
+            <button
+              onClick={() => { void handleCopy(); }}
+              className="flex-1 flex items-center justify-center gap-2 py-3.5 rounded-2xl text-sm font-bold text-white"
+              style={{ backgroundColor: "var(--color-primary)" }}
+            >
+              <span className="material-symbols-outlined text-base">{copied ? "check" : "content_copy"}</span>
+              {copied ? "Copied!" : "Copy to EHR"}
+            </button>
+          ) : null}
         </div>
       </main>
     </div>

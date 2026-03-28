@@ -84,7 +84,45 @@
 - **MRN numbers:** Always `Geist Mono`, `tabular-nums`
 - **Status badges:** ALL CAPS, `6px` tracking, pill shape. Pending=slate, In Progress=amber-bg, Updated=green-bg
 - **Table header labels:** ALL CAPS, `0.08em` letter-spacing, 11px, muted text — not primary
-- **Record button:** The only amber button. Never two amber buttons on screen simultaneously.
+- **Record button:** The only amber CTA button. Never two amber CTAs on screen simultaneously (see Amber Rule below).
+
+## Task Status System
+
+The care loop tracker uses a 5-state lifecycle for handoff tasks. Each state has a Material Symbols icon, a color, and a text treatment.
+
+| Status | Icon | Color | Text treatment |
+|--------|------|-------|----------------|
+| `pending` | `radio_button_unchecked` | `--text-muted` | Normal weight, normal color |
+| `done` | `check_circle` | `--success` (#16a34a) | Muted text (`--text-muted`) |
+| `awaiting_result` | `hourglass_empty` | `--accent` (#d97706 amber) | Normal text |
+| `carry_forward` | `arrow_forward` | `--primary` (#1e3a5f) | Normal text |
+| `resolved` | `cancel` | `--text-muted` | Muted text + `text-decoration: line-through` |
+
+**Tap-to-cycle:** The status icon is an interactive button. Tapping cycles through `pending → done → awaiting_result → carry_forward` (resolved is a terminal state, not part of the cycle). The icon must be minimum 44×44px touch target.
+
+**Amber Rule for status:** `awaiting_result` intentionally uses amber as a semantic signal — "sent, waiting on result." This is NOT a CTA. Multiple tasks can show amber simultaneously (a list of awaiting lab results is expected). The rule "never two amber elements simultaneously" applies only to CTAs and interactive elements (record button, primary action buttons), not to status state indicators.
+
+## Care Loop UI Patterns
+
+The patient detail screen is the core care loop interface. Three content areas:
+
+1. **Prior note pane** — the yesterday/earlier note; read-only reference; rendered as plain text with `#Problem` headers
+2. **Handoff pane** — today's task list; each task has a status icon (tap-to-cycle), a text input, and optional "add item" control; plus a free-text note field below; includes a "Copy Handoff" button
+3. **Generated note pane** — AI-generated note shown as a line diff (before/after); user can accept/reject
+
+**Mobile:** Three-pane navigation uses tab chips at the top (`Prior | Handoff | Note`). Only one pane visible at a time. Tab for prior note is disabled until a prior note exists.
+
+**Desktop:** All three panes visible simultaneously in a horizontal split (or configurable column layout).
+
+**"Copy Handoff" button:** Secondary style (not amber). Shows `content_copy` icon + "Copy Handoff" label. On success: transitions to `check` icon + "Copied!" for 2 seconds, then reverts. This is the only transient confirmation pattern in the app.
+
+**Warning state — no prior note:** When generating a note without a prior note loaded, show an inline warning: muted text, `warning` icon, `--warning` color. Not a blocking error — generation still proceeds.
+
+## Interaction Patterns
+
+- **Tap-to-cycle:** Stateful icon buttons that advance through a defined sequence on each tap. Used for task status. The icon itself communicates current state; no separate label needed at the icon level (label may appear in a tooltip or adjacent text for accessibility).
+- **Transient confirmation:** After a clipboard copy or other one-shot action, show a success state (icon + label swap) for exactly 2 seconds, then revert to default. Do not use a toast/snackbar for this — inline state change is less disruptive in a task-dense UI.
+- **Strikethrough for resolved:** `text-decoration: line-through` on the task text when status is `resolved`. Combined with muted text color. This is the only strikethrough usage in the app.
 
 ## CSS Custom Properties
 All tokens above must be defined as CSS custom properties on `:root` (light) and `[data-theme="dark"]`. Components reference tokens, never raw hex values.
@@ -125,3 +163,6 @@ All tokens above must be defined as CSS custom properties on `:root` (light) and
 | 2026-03-23 | Fraunces (variable optical serif) for patient names and SOAP headings | Chose Fraunces over Instrument Serif (too old-school) and Satoshi/sans (loses document feel of SOAP sections). Fraunces reads contemporary while retaining serif authority. |
 | 2026-03-23 | Amber as the sole accent color | Recording state is the product's most important moment — it deserves to be unmistakable and undiluted |
 | 2026-03-23 | Higher information density than category norm | Hospitalists think in lists (15–20 patients); competitors over-whitespace because they target consumer-app aesthetics; rounding sheet mental model is the right reference |
+| 2026-03-28 | Task status system — 5 states with icon+color+text treatment | Care loop pivot: tasks now have a lifecycle (pending→done→awaiting_result→carry_forward→resolved). Each state needs unambiguous visual differentiation at a glance in a dense list. |
+| 2026-03-28 | Amber allowed for awaiting_result status (multiple instances OK) | The original amber rule was written for CTAs only. `awaiting_result` is semantic state — multiple tasks awaiting results is normal and expected. Rule clarified: amber CTA = only one; amber status = many is fine. |
+| 2026-03-28 | Inline "Copied!" confirmation (2s revert) instead of toast | Task-dense UI has no room for toasts. Inline state swap on the exact button that was tapped is less disruptive and more spatially connected to the action. |

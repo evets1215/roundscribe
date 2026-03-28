@@ -6,13 +6,17 @@
  */
 
 import { NextResponse } from "next/server";
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import sharp from "sharp";
 import { getCurrentUserId } from "@/lib/current-user";
 
 export const runtime = "nodejs";
 
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+function getOpenAI() {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) return null;
+  return new OpenAI({ apiKey });
+}
 
 const ALLOWED_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
 type AllowedType = (typeof ALLOWED_TYPES)[number];
@@ -50,20 +54,27 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Failed to read image" }, { status: 400 });
   }
 
-  const response = await anthropic.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 1024,
-    messages: [
-      {
-        role: "user",
-        content: [
-          {
-            type: "image",
-            source: { type: "base64", media_type: mediaType, data: imageData },
-          },
-          {
-            type: "text",
-            text: `Extract every patient name, MRN number, and room/location visible in this image.
+  const openai = getOpenAI();
+  if (!openai) {
+    return NextResponse.json({ error: "OPENAI_API_KEY is not set" }, { status: 503 });
+  }
+
+  let response: Awaited<ReturnType<typeof openai.chat.completions.create>>;
+  try {
+    response = await openai.chat.completions.create({
+      model: "gpt-4o",
+      max_tokens: 1024,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: { url: `data:${mediaType};base64,${imageData}` },
+            },
+            {
+              type: "text",
+              text: `Extract every patient name, MRN number, and room/location visible in this image.
 Return ONLY a JSON array with no other text, markdown, or explanation:
 [{"name": "Doe, John", "mrn": "1234567", "location": "4B-12"}, ...]
 
@@ -73,17 +84,21 @@ Rules:
 - location: room number, bed, or location label as shown (e.g. "4B-12", "ICU 3", "Room 402"). Use empty string "" if not visible.
 - If a patient has no visible MRN, use an empty string ""
 - If no patients are found, return []`,
-          },
-        ],
-      },
-    ],
-  });
+            },
+          ],
+        },
+      ],
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "OpenAI API error";
+    return NextResponse.json({ error: message }, { status: 502 });
+  }
 
-  const raw = response.content[0]?.type === "text" ? response.content[0].text.trim() : "";
+  const raw = response.choices[0]?.message?.content?.trim() ?? "";
 
   let patients: Array<{ name: string; mrn: string; location: string }> = [];
   try {
-    // Strip markdown code fences if Claude wrapped the JSON
+    // Strip markdown code fences if the model wrapped the JSON
     const json = raw.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
     const parsed = JSON.parse(json);
     if (Array.isArray(parsed)) {
