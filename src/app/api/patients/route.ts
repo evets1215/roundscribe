@@ -4,19 +4,19 @@
  */
 
 import { NextResponse } from "next/server";
-import { auth } from "@/auth";
+import { getCurrentUserId } from "@/lib/current-user";
 import { prisma } from "@/lib/prisma";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  const session = await auth();
-  if (!session?.user?.id) {
+  const userId = await getCurrentUserId();
+  if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
   const patients = await prisma.patient.findMany({
-    where: { userId: session.user.id },
+    where: { userId },
     orderBy: [{ pinned: "desc" }, { createdAt: "asc" }],
   });
 
@@ -24,8 +24,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const session = await auth();
-  if (!session?.user?.id) {
+  const userId = await getCurrentUserId();
+  if (!userId) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
@@ -51,16 +51,7 @@ export async function POST(request: Request) {
       mrn: mrn.trim(),
       dob: dob ?? "",
       sex: sex ?? "M",
-      userId: session.user.id,
-    },
-  });
-
-  await prisma.auditLog.create({
-    data: {
-      userId: session.user.id,
-      patientId: patient.id,
-      action: "patient.create",
-      details: { name: patient.name, mrn: patient.mrn },
+      userId,
     },
   });
 

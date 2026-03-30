@@ -173,47 +173,144 @@ export type NoteOp =
 
 /** Regex scan of prior note — no LLM call — returns style rules to inject into system prompt */
 function extractNoteStyle(note: string): string {
-  const bulletMatch = note.match(/^([ \t]*)([-•*·–])\s/m);
-  const bullet = bulletMatch ? `${bulletMatch[2]} ` : "- ";
-  const altBullet = bullet === "- " ? "•" : "-";
-  const hasHashHeaders = /^#[A-Z\w]/m.test(note);
+  const lines = note.split("\n");
+
+  // --- Bullet detection (top-level + sub-bullets) ---
+  const bulletCounts: Record<string, number> = {};
+  const subBulletCounts: Record<string, number> = {};
+  for (const line of lines) {
+    const topMatch = line.match(/^([-•*·–])\s/);
+    if (topMatch) {
+      bulletCounts[topMatch[1]] = (bulletCounts[topMatch[1]] || 0) + 1;
+      continue;
+    }
+    const subMatch = line.match(/^([ \t]+)([-•*·–])\s/);
+    if (subMatch) {
+      const key = `${subMatch[1]}${subMatch[2]}`;
+      subBulletCounts[key] = (subBulletCounts[key] || 0) + 1;
+    }
+  }
+  // Most-used bullet character
+  const bullet = Object.entries(bulletCounts).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "-";
+  const altBullets = ["- ", "• ", "* ", "· ", "– "].filter((b) => b[0] !== bullet).map((b) => `'${b.trim()}'`).join(", ");
+
+  // Sub-bullet pattern (if any)
+  const subBulletEntry = Object.entries(subBulletCounts).sort((a, b) => b[1] - a[1])[0];
+  const subBulletRule = subBulletEntry
+    ? `- Sub-bullets use '${subBulletEntry[0]}' (preserve this indent+character exactly)`
+    : "- No sub-bullets detected — do not introduce indented sub-bullets";
+
+  // --- Header detection ---
+  const hashHeaders = lines.filter((l) => /^#{1,3}[A-Z\w]/.test(l));
+  const hashSpaceHeaders = lines.filter((l) => /^#{1,3}\s+[A-Z\w]/.test(l));
+  let headerRule: string;
+  if (hashHeaders.length > 0 && hashSpaceHeaders.length === 0) {
+    headerRule = "- Section headers use '#' directly before the name (e.g. '#Sepsis') — no space after '#'";
+  } else if (hashSpaceHeaders.length > 0) {
+    headerRule = "- Section headers use '# ' with a space (e.g. '# Sepsis')";
+  } else {
+    headerRule = "- Match the section header format already present in the OLD NOTE (no '#' headers detected)";
+  }
+
+  // --- Blank line patterns ---
+  let blanksBeforeSections = 0;
+  let sectionTransitions = 0;
+  for (let i = 1; i < lines.length; i++) {
+    if (/^#{1,3}\s*[A-Z\w]/.test(lines[i])) {
+      sectionTransitions++;
+      if (lines[i - 1]?.trim() === "") blanksBeforeSections++;
+    }
+  }
+  const blankLineRule = sectionTransitions > 0 && blanksBeforeSections >= sectionTransitions * 0.5
+    ? "- Sections are separated by a blank line before each '#' header — preserve this spacing"
+    : "- Do not add extra blank lines between sections unless the OLD NOTE already has them";
+
+  // --- Line ending detection (trailing spaces, etc.) ---
+  const trailingSpaceLines = lines.filter((l) => l !== l.trimEnd()).length;
+  const trailingRule = trailingSpaceLines > lines.length * 0.1
+    ? "- Some lines have trailing whitespace — preserve it, do not trim"
+    : "- Do not introduce trailing whitespace";
 
   return [
     "STYLE ENFORCEMENT (extracted from OLD NOTE — follow exactly, no exceptions):",
-    `- All new bullet points must use exactly '${bullet}' — never '${altBullet}', '–', numbered lists, or any other character`,
-    hasHashHeaders
-      ? "- Problem section headers use '#' prefix (e.g. '#Sepsis') — preserve this exactly"
-      : "- Match the section header format already present in the OLD NOTE",
-    "- Do not reformat, re-indent, or rephrase any line that is not explicitly changed",
+    `- All new bullet points must use exactly '${bullet} ' (${bullet} + space) — never ${altBullets}, numbered lists, or any other character`,
+    subBulletRule,
+    headerRule,
+    blankLineRule,
+    trailingRule,
+    "- Do not reformat, re-indent, or rephrase any line that is not explicitly changed by an operation",
     "- New lines must match the indentation and spacing of adjacent lines in the OLD NOTE",
+    "- Preserve all existing whitespace, blank lines, and formatting in unchanged content",
   ].join("\n");
 }
 
-export function applyOps(note: string, ops: NoteOp[]): string {
+/**
+ * Fuzzy line finder — tries exact match first, then normalized match
+ * (trimmed + collapsed whitespace). Returns the index or -1.
+ */
+function findLine(lines: string[], target: string): number {
+  // Exact match first
+  const exact = lines.indexOf(target);
+  if (exact !== -1) return exact;
+  // Normalized: trim + collapse internal whitespace
+  const norm = (s: string) => s.trim().replace(/\s+/g, " ");
+  const targetNorm = norm(target);
+  if (!targetNorm) return -1;
+  return lines.findIndex((l) => norm(l) === targetNorm);
+}
+
+export interface ApplyOpsResult {
+  text: string;
+  failedOps: NoteOp[];
+}
+
+export function applyOps(note: string, ops: NoteOp[]): ApplyOpsResult {
   let lines = note.split("\n");
+  const failedOps: NoteOp[] = [];
+
   for (const op of ops) {
     if (op.op === "replace") {
-      lines = lines.map((l) => (l === op.old ? op.new : l));
+      const idx = findLine(lines, op.old);
+      if (idx !== -1) {
+        lines[idx] = op.new;
+      } else {
+        failedOps.push(op);
+      }
     } else if (op.op === "append_to") {
-      lines = lines.map((l) => (l === op.match ? l + op.add : l));
+      const idx = findLine(lines, op.match);
+      if (idx !== -1) {
+        lines[idx] = lines[idx] + op.add;
+      } else {
+        failedOps.push(op);
+      }
     } else if (op.op === "insert_after") {
-      const idx = lines.indexOf(op.match);
-      if (idx !== -1) lines.splice(idx + 1, 0, op.new);
+      const idx = findLine(lines, op.match);
+      if (idx !== -1) {
+        lines.splice(idx + 1, 0, op.new);
+      } else {
+        failedOps.push(op);
+      }
     } else if (op.op === "insert_section") {
       const idx = lines.findIndex((l) => l.trimEnd() === op.after_section.trimEnd());
       if (idx !== -1) {
-        const end = lines.findIndex((l, i) => i > idx && l.startsWith("#"));
+        const end = lines.findIndex((l, i) => i > idx && /^#{1,3}\s*[A-Z\w]/.test(l));
         const insertAt = end === -1 ? lines.length : end;
         lines.splice(insertAt, 0, "", ...op.content.split("\n"));
       } else {
-        // section not found — append to end
+        // Fallback: append to end, but still flag as partial failure
         lines.push("", ...op.content.split("\n"));
+        failedOps.push(op);
       }
     } else if (op.op === "delete") {
-      lines = lines.filter((l) => l !== op.old);
+      const idx = findLine(lines, op.old);
+      if (idx !== -1) {
+        lines.splice(idx, 1);
+      } else {
+        failedOps.push(op);
+      }
     }
   }
-  return lines.join("\n");
+  return { text: lines.join("\n"), failedOps };
 }
 
 const HANDOFF_SYSTEM_PROMPT = `You are a clinical note editor. Given an OLD NOTE and TODAY'S UPDATE, return ONLY a JSON array of minimal surgical edits — do not return the full note.
@@ -225,11 +322,20 @@ Each edit must be one of these exact shapes:
 { "op": "insert_section", "after_section": "verbatim #SectionHeader line", "content": "full new section as a single string with \\n between lines" }
 { "op": "delete", "old": "verbatim line from OLD NOTE to remove" }
 
-Rules:
-- "old", "match", "after_section" must be copied character-for-character from the OLD NOTE
-- All new bullets must use the EXACT same bullet character and indentation as adjacent bullets in the OLD NOTE (e.g. if existing bullets use "- ", new bullets must also use "- ")
-- Do not emit operations for lines that do not change
-- Do not rewrite, reformat, or reword any unchanged content
+CRITICAL — line matching:
+- "old", "match", "after_section" must be copied CHARACTER-FOR-CHARACTER from the OLD NOTE
+- Copy the ENTIRE line including any leading whitespace, bullet character, and trailing text
+- Do NOT fix typos, adjust spacing, or normalize the original line — use it exactly as-is
+- If the OLD NOTE line is "- vancomycin 1g q12h", you write exactly "- vancomycin 1g q12h" — not "- Vancomycin 1g q12h", not "-vancomycin 1g q12h"
+
+CRITICAL — format preservation:
+- All new bullets must use the EXACT same bullet character and indentation as adjacent bullets in the OLD NOTE
+- Do NOT emit operations for lines that do not change
+- Do NOT rewrite, reformat, capitalize, re-indent, or rephrase any unchanged content
+- Do NOT convert "- " bullets to "• " or vice versa
+- Do NOT add numbering (1., 2.) where the note uses dash bullets
+- Do NOT wrap or split lines differently than the OLD NOTE
+- Do NOT add section headers that don't follow the OLD NOTE's header format
 - If TODAY'S UPDATE introduces a genuinely new clinical problem (e.g. fever + neutropenia + antibiotic), emit an insert_section operation
 - Strip checkbox markers: "[ ] item" or "[x] item" → plain bullet using the note's existing bullet style
 
@@ -243,7 +349,13 @@ Clinical routing:
 - Medication dose change or new medication → replace existing med line if present, otherwise insert_after the last bullet in the relevant section
 - Imaging result returned → if a pending imaging order line exists, replace it with the result; otherwise insert_after the relevant section
 - Overnight event or nursing call (fever, desat, fall, pain) → insert_after the most relevant problem; create insert_section only for genuinely new clinical problems
-- RESOLVED items → emit { "op": "delete", "old": "exact line" } for the most specific matching bullet; do NOT delete the section header unless all its bullets are also deleted
+- RESOLVED items → emit { "op": "delete", "old": "exact line" } for the MOST SPECIFIC matching bullet in the OLD NOTE. Find the line that most closely corresponds to the resolved item and delete it. Do NOT delete section headers unless ALL their bullets are also deleted in the same edit batch.
+
+PENDING FROM YESTERDAY handling:
+- If a "PENDING FROM YESTERDAY" section is present, these are tasks carried forward or awaiting results from the prior shift
+- Surface them in the note: e.g. "labs pending from overnight: BMP, coags" or "neurology consult called, awaiting callback"
+- Use insert_after or replace to add these into the relevant problem sections — do not append to the bottom
+- If the prior note already mentions the pending item, update it rather than duplicating
 
 Return ONLY the JSON array. No explanation, no markdown fences.`;
 
@@ -283,13 +395,26 @@ export async function generateNoteFromHandoff(
     ? `${HANDOFF_SYSTEM_PROMPT}\n\n${styleRules}`
     : HANDOFF_SYSTEM_PROMPT;
 
-  const userMsg = [
+  // Phase B: inject carry_forward + awaiting_result as explicit "pending from yesterday" context
+  const pendingFromYesterday: string[] = [];
+  if (carryItems.length) {
+    pendingFromYesterday.push("Carried forward from prior shift (not yet completed — surface these in the note as ongoing):");
+    for (const i of carryItems) pendingFromYesterday.push(`- ${i.text}`);
+  }
+  if (awaitingItems.length) {
+    pendingFromYesterday.push("Awaiting results from prior shift (orders placed, results not back — note as pending):");
+    for (const i of awaitingItems) pendingFromYesterday.push(`- ${i.text}`);
+  }
+
+  const userMsgParts = [
     "OLD NOTE:",
     previousNote || "(none — synthesize a full note from today's update below)",
-    "",
-    "TODAY'S UPDATE:",
-    todayUpdate,
-  ].join("\n").trim();
+  ];
+  if (pendingFromYesterday.length) {
+    userMsgParts.push("", "PENDING FROM YESTERDAY:", ...pendingFromYesterday);
+  }
+  userMsgParts.push("", "TODAY'S UPDATE:", todayUpdate);
+  const userMsg = userMsgParts.join("\n").trim();
 
   const response = await client.chat.completions.create({
     model: MODEL,
@@ -306,9 +431,16 @@ export async function generateNoteFromHandoff(
   try {
     const ops = JSON.parse(cleaned) as NoteOp[];
     if (!Array.isArray(ops)) throw new Error("not an array");
-    const rawText = previousNote
-      ? applyOps(previousNote, ops)
-      : ops.map((o) => ("new" in o ? o.new : "content" in o ? o.content : "")).join("\n");
+    if (previousNote) {
+      const result = applyOps(previousNote, ops);
+      return {
+        format: "SOAP",
+        rawText: result.text,
+        ops,
+        failedOps: result.failedOps.length > 0 ? result.failedOps : undefined,
+      };
+    }
+    const rawText = ops.map((o) => ("new" in o ? o.new : "content" in o ? o.content : "")).join("\n");
     return { format: "SOAP", rawText, ops };
   } catch {
     // Fallback: treat response as plain text if JSON parsing fails

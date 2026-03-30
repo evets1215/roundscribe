@@ -1,17 +1,18 @@
 import { PrismaClient } from "@prisma/client";
-import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3";
+import path from "node:path";
 
-// DATABASE_URL may be absent at build time — defer connection to first query.
 const globalForPrisma = globalThis as unknown as { prisma: PrismaClient };
+
+const dbPath = path.join(process.cwd(), "prisma", "dev.db");
 
 export const prisma: PrismaClient =
   globalForPrisma.prisma ??
   (() => {
-    const connectionString = process.env.DATABASE_URL ?? "";
-    const adapter = new PrismaPg({ connectionString });
+    const adapter = new PrismaBetterSqlite3({ url: dbPath });
     return new PrismaClient({
       adapter,
-      log: process.env.NODE_ENV === "development" ? ["query", "error", "warn"] : ["error"],
+      log: process.env.NODE_ENV === "development" ? ["error", "warn"] : ["error"],
     });
   })();
 

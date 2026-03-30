@@ -6,7 +6,19 @@ import { useRouter } from "next/navigation";
 import { signOut } from "next-auth/react";
 import AppSidebar from "@/components/AppSidebar";
 import StatusBadge from "@/components/StatusBadge";
+import PatientListPanel from "@/components/PatientListPanel";
+import { PatientWorkspace } from "@/app/patients/[id]/page";
 import { patients as initialPatients, type Patient } from "@/lib/data";
+import {
+  type TaskStatus,
+  type HandoffItem,
+  STATUS_ICON,
+  STATUS_COLOR,
+  handleNoteKeyDown,
+} from "@/lib/handoff-types";
+import { useHandoff } from "@/hooks/useHandoff";
+import { useSmartInput } from "@/hooks/useSmartInput";
+import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 
 function storePatient(patient: Patient) {
   try { sessionStorage.setItem(`rs-patient-${patient.id}`, JSON.stringify(patient)); } catch {}
@@ -18,39 +30,6 @@ type ColKey = "name" | "room" | "status" | "mrn";
 const DEFAULT_COL_ORDER: ColKey[] = ["name", "room", "status", "mrn"];
 const COL_LABEL: Record<ColKey, string> = { name: "Name", room: "Room", status: "Status", mrn: "MRN" };
 const SORTABLE_COLS = new Set<ColKey>(["room", "status", "mrn"]);
-
-
-type TaskStatus = "pending" | "awaiting_result" | "done" | "carry_forward" | "resolved";
-interface HandoffItem {
-  id: string;
-  text: string;
-  status: TaskStatus;
-  createdAt?: number;
-}
-interface HandoffData {
-  items: HandoffItem[];
-  note: string;
-}
-
-const STATUS_CYCLE: TaskStatus[] = ["pending", "done", "awaiting_result", "carry_forward"];
-const STATUS_ICON: Record<TaskStatus, string> = {
-  pending:        "radio_button_unchecked",
-  done:           "check_circle",
-  awaiting_result:"hourglass_empty",
-  carry_forward:  "arrow_forward",
-  resolved:       "cancel",
-};
-const STATUS_COLOR: Record<TaskStatus, string> = {
-  pending:        "var(--color-on-surface-variant)",
-  done:           "#16a34a",
-  awaiting_result:"#d97706",
-  carry_forward:  "var(--color-primary)",
-  resolved:       "var(--color-outline)",
-};
-
-function migrateItems(items: (HandoffItem & { done?: boolean })[]): HandoffItem[] {
-  return items.map((i) => i.status ? i : { ...i, status: i.done ? "done" : "pending" } as HandoffItem);
-}
 
 interface NewPatientForm {
   name: string;
@@ -83,6 +62,22 @@ function Modal({ onClose, children, sheet = false }: { onClose: () => void; chil
 
 export default function DashboardPage() {
   const router = useRouter();
+  // Workspace mode: when a patient is selected, show the single-screen workspace
+  const [selectedPatientId, setSelectedPatientId] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    return new URLSearchParams(window.location.search).get("patient");
+  });
+
+  const selectPatient = (id: string) => {
+    setSelectedPatientId(id);
+    window.history.replaceState(null, "", `/?patient=${id}`);
+  };
+
+  const deselectPatient = () => {
+    setSelectedPatientId(null);
+    window.history.replaceState(null, "", "/");
+  };
+
   const [patients, setPatients] = useState<Patient[]>(() => {
     try {
       const saved = localStorage.getItem("rs-patient-list");
@@ -90,6 +85,32 @@ export default function DashboardPage() {
     } catch {}
     return initialPatients;
   });
+
+  // Fetch patients from API on mount (DB is source of truth)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch("/api/patients");
+        if (!res.ok) return; // fall back to localStorage
+        const data = (await res.json()) as Record<string, unknown>[];
+        if (!cancelled && data.length > 0) {
+          setPatients(data.map((p) => ({
+            id: p.id as string,
+            name: p.name as string,
+            room: p.room as string,
+            mrn: p.mrn as string,
+            dob: (p.dob as string) ?? "",
+            sex: (p.sex as "M" | "F") ?? "M",
+            status: (p.status as Patient["status"]) ?? "Pending",
+            lastNote: (p.lastNote as string) ?? "Not started",
+            pinned: (p.pinned as boolean) ?? false,
+          })));
+        }
+      } catch {} // offline — use localStorage
+    })();
+    return () => { cancelled = true; };
+  }, []);
   const [sort, setSort] = useState<{ key: SortKey; dir: "asc" | "desc" } | null>(null);
   const [colOrder, setColOrder] = useState<ColKey[]>(() => {
     try {
@@ -101,25 +122,20 @@ export default function DashboardPage() {
   const [dragCol, setDragCol] = useState<ColKey | null>(null);
   const [dragOverCol, setDragOverCol] = useState<ColKey | null>(null);
   const [openHandoff, setOpenHandoff] = useState<string | null>(null);
-  const [pendingFocusId, setPendingFocusId] = useState<string | null>(null);
   const [swipedPatientId, setSwipedPatientId] = useState<string | null>(null);
   const touchStartX = useRef(0);
   const touchStartY = useRef(0);
-  const [handoffNotes, setHandoffNotes] = useState<Record<string, HandoffData>>(() => {
-    try {
-      const saved = localStorage.getItem("rs-handoff");
-      if (saved) {
-        const raw = JSON.parse(saved) as Record<string, HandoffData & { items: (HandoffItem & { done?: boolean })[] }>;
-        // Migrate items that have done: boolean but no status
-        const migrated: Record<string, HandoffData> = {};
-        for (const [k, v] of Object.entries(raw)) {
-          migrated[k] = { ...v, items: migrateItems(v.items ?? []) };
-        }
-        return migrated;
-      }
-    } catch {}
-    return {};
-  });
+  const {
+    getHandoff,
+    updateItem: updateHandoffItem,
+    cycleStatus: cycleHandoffStatus,
+    updateNote: updateHandoffNote,
+    addItem: addHandoffItem,
+    removeItem: removeHandoffItem,
+    setAllHandoff: setHandoffNotes,
+    setPendingFocusId,
+  } = useHandoff();
+  const smart = useSmartInput();
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
 
@@ -151,10 +167,18 @@ export default function DashboardPage() {
     if (!patient) return;
     const newPinned = !patient.pinned;
     setPatients((prev) => prev.map((p) => (p.id === id ? { ...p, pinned: newPinned } : p)));
+    // Persist to DB (fire-and-forget)
+    fetch(`/api/patients/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned: newPinned }),
+    }).catch(() => {});
   };
 
   const deletePatient = (id: string) => {
     setPatients((prev) => prev.filter((p) => p.id !== id));
+    // Persist to DB (fire-and-forget)
+    fetch(`/api/patients/${id}`, { method: "DELETE" }).catch(() => {});
   };
 
   // Persist patient list across refreshes
@@ -166,18 +190,6 @@ export default function DashboardPage() {
   useEffect(() => {
     try { localStorage.setItem("rs-col-order", JSON.stringify(colOrder)); } catch {}
   }, [colOrder]);
-
-  // Persist handoff notes
-  useEffect(() => {
-    try { localStorage.setItem("rs-handoff", JSON.stringify(handoffNotes)); } catch {}
-  }, [handoffNotes]);
-
-  // Focus newly created checklist items
-  useEffect(() => {
-    if (!pendingFocusId) return;
-    document.getElementById(`hi-${pendingFocusId}`)?.focus();
-    setPendingFocusId(null);
-  }, [pendingFocusId]);
 
   const handleSort = (key: SortKey) => {
     setSort((prev) => {
@@ -208,9 +220,6 @@ export default function DashboardPage() {
   };
   const handleColDragEnd = () => { setDragCol(null); setDragOverCol(null); };
 
-  const getHandoff = (patientId: string): HandoffData =>
-    handoffNotes[patientId] ?? { items: [], note: "" };
-
   const toggleHandoff = (patientId: string) => {
     setOpenHandoff(prev => {
       if (prev === patientId) return null;
@@ -225,60 +234,6 @@ export default function DashboardPage() {
       });
       if (firstId) setPendingFocusId(firstId);
       return patientId;
-    });
-  };
-
-  const updateHandoffItem = (patientId: string, itemId: string, text: string) => {
-    setHandoffNotes(prev => {
-      const d = getHandoff(patientId);
-      return { ...prev, [patientId]: { ...d, items: d.items.map(i => i.id === itemId ? { ...i, text } : i) } };
-    });
-  };
-
-  const cycleHandoffStatus = (patientId: string, itemId: string) => {
-    setHandoffNotes(prev => {
-      const d = getHandoff(patientId);
-      return {
-        ...prev,
-        [patientId]: {
-          ...d,
-          items: d.items.map((i) => {
-            if (i.id !== itemId) return i;
-            const idx = STATUS_CYCLE.indexOf(i.status);
-            return { ...i, status: STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length] };
-          }),
-        },
-      };
-    });
-  };
-
-  const updateHandoffNote = (patientId: string, note: string) => {
-    setHandoffNotes(prev => ({ ...prev, [patientId]: { ...getHandoff(patientId), note } }));
-  };
-
-  const addHandoffItem = (patientId: string, afterId?: string) => {
-    const newItem: HandoffItem = { id: `h-${Date.now()}-${Math.random()}`, text: "", status: "pending", createdAt: Date.now() };
-    setHandoffNotes(prev => {
-      const d = getHandoff(patientId);
-      if (afterId) {
-        const idx = d.items.findIndex(i => i.id === afterId);
-        const next = [...d.items];
-        next.splice(idx + 1, 0, newItem);
-        return { ...prev, [patientId]: { ...d, items: next } };
-      }
-      return { ...prev, [patientId]: { ...d, items: [...d.items, newItem] } };
-    });
-    setPendingFocusId(newItem.id);
-  };
-
-  const removeHandoffItem = (patientId: string, itemId: string) => {
-    setHandoffNotes(prev => {
-      const d = getHandoff(patientId);
-      if (d.items.length <= 1) return prev;
-      const idx = d.items.findIndex(i => i.id === itemId);
-      const next = d.items.filter(i => i.id !== itemId);
-      setPendingFocusId(next[Math.max(0, idx - 1)]?.id ?? null);
-      return { ...prev, [patientId]: { ...d, items: next } };
     });
   };
 
@@ -306,14 +261,16 @@ export default function DashboardPage() {
     return aVal < bVal ? -dir : aVal > bVal ? dir : 0;
   });
 
-  const handleAddPatient = () => {
+  const handleAddPatient = async () => {
     setAddError("");
     if (!newPatient.name.trim()) { setAddError("Patient name is required."); return; }
     if (!newPatient.room.trim()) { setAddError("Room is required."); return; }
     if (!newPatient.mrn.trim()) { setAddError("MRN is required."); return; }
 
-    const created: Patient = {
-      id: `local-${Date.now()}`,
+    // Optimistic local patient (shown immediately)
+    const tempId = `local-${Date.now()}`;
+    const optimistic: Patient = {
+      id: tempId,
       name: newPatient.name.trim(),
       room: newPatient.room.trim().toUpperCase(),
       mrn: newPatient.mrn.trim(),
@@ -323,10 +280,29 @@ export default function DashboardPage() {
       lastNote: "Not started",
       pinned: false,
     };
-
-    setPatients((prev) => [created, ...prev]);
+    setPatients((prev) => [optimistic, ...prev]);
     setNewPatient({ name: "", room: "", mrn: "", dob: "", sex: "M" });
     setShowAddPatient(false);
+
+    // Persist to DB
+    try {
+      const res = await fetch("/api/patients", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: optimistic.name,
+          room: optimistic.room,
+          mrn: optimistic.mrn,
+          dob: optimistic.dob,
+          sex: optimistic.sex,
+        }),
+      });
+      if (res.ok) {
+        const saved = (await res.json()) as Patient;
+        // Replace temp ID with server ID
+        setPatients((prev) => prev.map((p) => p.id === tempId ? { ...optimistic, ...saved } : p));
+      }
+    } catch {} // offline — keep local version
   };
 
   const resetAddForm = () => {
@@ -361,7 +337,7 @@ export default function DashboardPage() {
     }
   };
 
-  const handleAddAllScanned = () => {
+  const handleAddAllScanned = async () => {
     const now = Date.now();
     const created: Patient[] = scannedPatients.map((p, i) => ({
       id: `local-${now}-${i}`,
@@ -376,8 +352,78 @@ export default function DashboardPage() {
     }));
     setPatients((prev) => [...created, ...prev]);
     resetAddForm();
+
+    // Persist all scanned patients to DB
+    for (const p of created) {
+      try {
+        const res = await fetch("/api/patients", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: p.name, room: p.room, mrn: p.mrn, dob: p.dob, sex: p.sex }),
+        });
+        if (res.ok) {
+          const saved = (await res.json()) as Patient;
+          setPatients((prev) => prev.map((x) => x.id === p.id ? { ...p, ...saved } : x));
+        }
+      } catch {} // offline — keep local
+    }
   };
 
+  // ── Keyboard shortcuts ─────────────────────────────────────────────────
+  useKeyboardShortcuts({
+    onNextPatient: () => {
+      if (!selectedPatientId) return;
+      const idx = patients.findIndex((p) => p.id === selectedPatientId);
+      if (idx < patients.length - 1) selectPatient(patients[idx + 1].id);
+    },
+    onPrevPatient: () => {
+      if (!selectedPatientId) return;
+      const idx = patients.findIndex((p) => p.id === selectedPatientId);
+      if (idx > 0) selectPatient(patients[idx - 1].id);
+    },
+    onEscape: () => {
+      if (selectedPatientId) deselectPatient();
+    },
+  });
+
+  // ── Workspace mode ────────────────────────────────────────────────────
+  if (selectedPatientId) {
+    return (
+      <div className="flex h-screen overflow-hidden" style={{ backgroundColor: "var(--color-surface)" }}>
+        <AppSidebar />
+        <div className="md:ml-64 flex-1 flex min-w-0 h-screen overflow-hidden">
+          {/* Patient list panel */}
+          <div className="hidden lg:flex w-[240px] shrink-0 h-full overflow-hidden">
+            <PatientListPanel
+              patients={patients}
+              activePatientId={selectedPatientId}
+              onSelectPatient={selectPatient}
+              onAddPatient={() => setShowAddPatient(true)}
+              onDeletePatient={deletePatient}
+              onPinPatient={(id, pinned) => togglePin(id)}
+            />
+          </div>
+          {/* Workspace */}
+          <div className="flex-1 min-w-0 h-full overflow-hidden">
+            {/* Back button (mobile + tablet) */}
+            <div className="lg:hidden flex items-center gap-2 px-4 py-2 border-b" style={{ borderColor: "var(--color-outline-variant, #e2e8f0)" }}>
+              <button
+                onClick={deselectPatient}
+                className="flex items-center gap-1 text-sm font-medium"
+                style={{ color: "var(--color-primary)" }}
+              >
+                <span className="material-symbols-outlined text-lg">arrow_back</span>
+                All patients
+              </button>
+            </div>
+            <PatientWorkspace patientId={selectedPatientId} embedded />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Dashboard (list) mode ───────────────────────────────────────────────
   return (
     <div className="flex min-h-screen" style={{ backgroundColor: "var(--color-surface)" }}>
       <AppSidebar />
@@ -511,6 +557,22 @@ export default function DashboardPage() {
 
             <div className="flex items-center gap-2">
               <button
+                onClick={() => {
+                  // Cycle: default → room asc → room desc → default
+                  if (!sort || sort.key !== "room") handleSort("room");
+                  else if (sort.dir === "asc") handleSort("room");
+                  else setSort(null);
+                }}
+                className="md:hidden flex items-center gap-1 px-3 py-2 min-h-[44px] rounded text-xs font-semibold transition-all active:scale-95 touch-manipulation"
+                style={{
+                  backgroundColor: sort?.key === "room" ? "var(--color-primary-container)" : "var(--color-surface-container-high)",
+                  color: sort?.key === "room" ? "var(--color-on-primary-container)" : "var(--color-on-surface-variant)",
+                }}
+              >
+                <span className="material-symbols-outlined text-base">sort</span>
+                {sort?.key === "room" ? `Room ${sort.dir === "asc" ? "↑" : "↓"}` : "Sort"}
+              </button>
+              <button
                 onClick={() => setShowAddPatient(true)}
                 className="flex items-center gap-1.5 px-4 py-2.5 min-h-[44px] rounded text-xs font-bold text-white shadow-sm hover:opacity-90 transition-all active:scale-95 touch-manipulation"
                 style={{ backgroundColor: "var(--color-primary)" }}
@@ -570,7 +632,7 @@ export default function DashboardPage() {
                   >
                     {/* Room number — large, primary, left anchor */}
                     <button
-                      onClick={() => { storePatient(patient); router.push(`/patients/${patient.id}`); }}
+                      onClick={() => { storePatient(patient); selectPatient(patient.id); }}
                       className="shrink-0 text-2xl font-black leading-none min-w-[56px] text-left"
                       style={{ color: "var(--color-primary)", fontFamily: "var(--font-mono)" }}
                     >
@@ -579,7 +641,7 @@ export default function DashboardPage() {
 
                     {/* Name + status */}
                     <button
-                      onClick={() => { storePatient(patient); router.push(`/patients/${patient.id}`); }}
+                      onClick={() => { storePatient(patient); selectPatient(patient.id); }}
                       className="flex-1 min-w-0 text-left"
                     >
                       <div className="text-base font-bold truncate" style={{ color: "var(--color-on-surface)" }}>
@@ -593,7 +655,7 @@ export default function DashboardPage() {
                     {/* Mic + Handoff */}
                     <div className="flex items-center gap-1 shrink-0">
                       <button
-                        onClick={() => { storePatient(patient); router.push(`/patients/${patient.id}?record=1`); }}
+                        onClick={() => { storePatient(patient); selectPatient(patient.id); }}
                         className="p-2 rounded-full transition-colors hover:bg-slate-100 min-w-[44px] min-h-[44px] flex items-center justify-center"
                         title="Record"
                         style={{ color: "var(--color-on-surface-variant)" }}
@@ -647,8 +709,51 @@ export default function DashboardPage() {
                               value={item.text}
                               onChange={(e) => updateHandoffItem(patient.id, item.id, e.target.value)}
                               onKeyDown={(e) => {
-                                if (e.key === "Enter") { e.preventDefault(); addHandoffItem(patient.id, item.id); }
-                                if (e.key === "Backspace" && item.text === "") { e.preventDefault(); removeHandoffItem(patient.id, item.id); }
+                                if (smart.handleKeyDown(e, () => item.text, (v) => updateHandoffItem(patient.id, item.id, v))) return;
+                                const items = getHandoff(patient.id).items;
+                                if (e.key === "Enter") {
+                                  e.preventDefault();
+                                  const pos = e.currentTarget.selectionStart ?? item.text.length;
+                                  const before = item.text.slice(0, pos);
+                                  const after = item.text.slice(pos);
+                                  const newId = `h-${Date.now()}-${Math.random()}`;
+                                  setHandoffNotes(prev => {
+                                    const d = prev[patient.id] ?? { items: [], note: "" };
+                                    const updated = d.items.map(i => i.id === item.id ? { ...i, text: before } : i);
+                                    const i2 = updated.findIndex(i => i.id === item.id);
+                                    updated.splice(i2 + 1, 0, { id: newId, text: after, status: "pending" as TaskStatus, createdAt: Date.now() });
+                                    return { ...prev, [patient.id]: { ...d, items: updated } };
+                                  });
+                                  setPendingFocusId(newId);
+                                }
+                                if (e.key === "ArrowUp" && idx > 0) {
+                                  const pos = e.currentTarget.selectionStart ?? 0;
+                                  e.preventDefault();
+                                  const prevEl = document.getElementById(`hi-${items[idx - 1].id}`) as HTMLInputElement | null;
+                                  if (prevEl) { prevEl.focus(); prevEl.setSelectionRange(Math.min(pos, items[idx - 1].text.length), Math.min(pos, items[idx - 1].text.length)); }
+                                }
+                                if (e.key === "ArrowDown" && idx < items.length - 1) {
+                                  const pos = e.currentTarget.selectionStart ?? 0;
+                                  e.preventDefault();
+                                  const nextEl = document.getElementById(`hi-${items[idx + 1].id}`) as HTMLInputElement | null;
+                                  if (nextEl) { nextEl.focus(); nextEl.setSelectionRange(Math.min(pos, items[idx + 1].text.length), Math.min(pos, items[idx + 1].text.length)); }
+                                }
+                                if (e.key === "Backspace" && idx > 0 && e.currentTarget.selectionStart === 0 && e.currentTarget.selectionEnd === 0) {
+                                  e.preventDefault();
+                                  const prevItem = items[idx - 1];
+                                  const cursorPos = prevItem.text.length;
+                                  const merged = prevItem.text + item.text;
+                                  setHandoffNotes(prev => {
+                                    const d = prev[patient.id] ?? { items: [], note: "" };
+                                    return { ...prev, [patient.id]: { ...d, items: d.items.map(i => i.id === prevItem.id ? { ...i, text: merged } : i).filter(i => i.id !== item.id) } };
+                                  });
+                                  requestAnimationFrame(() => {
+                                    const el = document.getElementById(`hi-${prevItem.id}`) as HTMLInputElement | null;
+                                    if (el) { el.focus(); el.setSelectionRange(cursorPos, cursorPos); }
+                                  });
+                                } else if (e.key === "Backspace" && item.text === "" && idx === 0 && items.length > 1) {
+                                  e.preventDefault(); removeHandoffItem(patient.id, item.id);
+                                }
                               }}
                               placeholder={idx === 0 ? "Add task..." : ""}
                               className="flex-1 bg-transparent text-sm outline-none min-h-[44px]"
@@ -659,6 +764,16 @@ export default function DashboardPage() {
                                 textDecoration: item.status === "resolved" ? "line-through" : "none",
                               }}
                             />
+                            {item.status === "carry_forward" && item.createdAt && Date.now() - item.createdAt > 3 * 24 * 60 * 60 * 1000 && (
+                              <span
+                                className="text-[9px] font-bold shrink-0 flex items-center gap-0.5"
+                                style={{ color: "var(--warning)" }}
+                                title={`Carried forward for ${Math.floor((Date.now() - item.createdAt) / (24 * 60 * 60 * 1000))} days`}
+                              >
+                                <span className="material-symbols-outlined text-xs">warning</span>
+                                {Math.floor((Date.now() - item.createdAt) / (24 * 60 * 60 * 1000))}d
+                              </span>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -667,12 +782,22 @@ export default function DashboardPage() {
                       <div className="px-4 pb-3 pt-1" style={{ backgroundColor: "var(--color-surface)", borderTop: "1px solid var(--color-outline-variant)" }}>
                         <textarea
                           value={getHandoff(patient.id).note}
-                          onChange={(e) => updateHandoffNote(patient.id, e.target.value)}
+                          onChange={(e) => {
+                            updateHandoffNote(patient.id, e.target.value);
+                            e.target.style.height = "auto";
+                            e.target.style.height = `${e.target.scrollHeight}px`;
+                          }}
+                          onKeyDown={(e) => handleNoteKeyDown(e, (v) => updateHandoffNote(patient.id, v))}
+                          onPaste={smart.handlePaste}
                           placeholder="Start typing clinical notes here..."
-                          rows={3}
                           className="w-full bg-transparent text-sm outline-none resize-none"
-                          style={{ color: "var(--color-on-surface)" }}
+                          style={{ color: "var(--color-on-surface)", minHeight: "72px" }}
                         />
+                        {smart.pasteConfirmation && (
+                          <p className="text-xs mt-1 animate-pulse" style={{ color: "var(--color-primary)" }}>
+                            {smart.pasteConfirmation}
+                          </p>
+                        )}
                       </div>
 
                       {/* Full-width Save/Done CTA */}
@@ -861,7 +986,7 @@ export default function DashboardPage() {
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-2">
                           <button
-                            onClick={() => { storePatient(patient); router.push(`/patients/${patient.id}?record=1`); }}
+                            onClick={() => { storePatient(patient); selectPatient(patient.id); }}
                             className="p-2.5 rounded-full transition-colors hover:bg-slate-100 min-w-[44px] min-h-[44px] flex items-center justify-center"
                             title="Start Recording"
                             style={{ color: "var(--color-primary)" }}
@@ -933,8 +1058,51 @@ export default function DashboardPage() {
                                     value={item.text}
                                     onChange={(e) => updateHandoffItem(patient.id, item.id, e.target.value)}
                                     onKeyDown={(e) => {
-                                      if (e.key === "Enter") { e.preventDefault(); addHandoffItem(patient.id, item.id); }
-                                      if (e.key === "Backspace" && item.text === "") { e.preventDefault(); removeHandoffItem(patient.id, item.id); }
+                                      if (smart.handleKeyDown(e, () => item.text, (v) => updateHandoffItem(patient.id, item.id, v))) return;
+                                      const items = getHandoff(patient.id).items;
+                                      if (e.key === "Enter") {
+                                        e.preventDefault();
+                                        const pos = e.currentTarget.selectionStart ?? item.text.length;
+                                        const before = item.text.slice(0, pos);
+                                        const after = item.text.slice(pos);
+                                        const newId = `h-${Date.now()}-${Math.random()}`;
+                                        setHandoffNotes(prev => {
+                                          const d = prev[patient.id] ?? { items: [], note: "" };
+                                          const updated = d.items.map(i => i.id === item.id ? { ...i, text: before } : i);
+                                          const i2 = updated.findIndex(i => i.id === item.id);
+                                          updated.splice(i2 + 1, 0, { id: newId, text: after, status: "pending" as TaskStatus, createdAt: Date.now() });
+                                          return { ...prev, [patient.id]: { ...d, items: updated } };
+                                        });
+                                        setPendingFocusId(newId);
+                                      }
+                                      if (e.key === "ArrowUp" && idx > 0) {
+                                        const pos = e.currentTarget.selectionStart ?? 0;
+                                        e.preventDefault();
+                                        const prevEl = document.getElementById(`hi-${items[idx - 1].id}`) as HTMLInputElement | null;
+                                        if (prevEl) { prevEl.focus(); prevEl.setSelectionRange(Math.min(pos, items[idx - 1].text.length), Math.min(pos, items[idx - 1].text.length)); }
+                                      }
+                                      if (e.key === "ArrowDown" && idx < items.length - 1) {
+                                        const pos = e.currentTarget.selectionStart ?? 0;
+                                        e.preventDefault();
+                                        const nextEl = document.getElementById(`hi-${items[idx + 1].id}`) as HTMLInputElement | null;
+                                        if (nextEl) { nextEl.focus(); nextEl.setSelectionRange(Math.min(pos, items[idx + 1].text.length), Math.min(pos, items[idx + 1].text.length)); }
+                                      }
+                                      if (e.key === "Backspace" && idx > 0 && e.currentTarget.selectionStart === 0 && e.currentTarget.selectionEnd === 0) {
+                                        e.preventDefault();
+                                        const prevItem = items[idx - 1];
+                                        const cursorPos = prevItem.text.length;
+                                        const merged = prevItem.text + item.text;
+                                        setHandoffNotes(prev => {
+                                          const d = prev[patient.id] ?? { items: [], note: "" };
+                                          return { ...prev, [patient.id]: { ...d, items: d.items.map(i => i.id === prevItem.id ? { ...i, text: merged } : i).filter(i => i.id !== item.id) } };
+                                        });
+                                        requestAnimationFrame(() => {
+                                          const el = document.getElementById(`hi-${prevItem.id}`) as HTMLInputElement | null;
+                                          if (el) { el.focus(); el.setSelectionRange(cursorPos, cursorPos); }
+                                        });
+                                      } else if (e.key === "Backspace" && item.text === "" && idx === 0 && items.length > 1) {
+                                        e.preventDefault(); removeHandoffItem(patient.id, item.id);
+                                      }
                                     }}
                                     placeholder={idx === 0 ? "Add task..." : ""}
                                     className="flex-1 bg-transparent text-sm outline-none"
@@ -945,18 +1113,38 @@ export default function DashboardPage() {
                                       textDecoration: item.status === "resolved" ? "line-through" : "none",
                                     }}
                                   />
+                                  {item.status === "carry_forward" && item.createdAt && Date.now() - item.createdAt > 3 * 24 * 60 * 60 * 1000 && (
+                                    <span
+                                      className="text-[9px] font-bold shrink-0 flex items-center gap-0.5"
+                                      style={{ color: "var(--warning)" }}
+                                      title={`Carried forward for ${Math.floor((Date.now() - item.createdAt) / (24 * 60 * 60 * 1000))} days`}
+                                    >
+                                      <span className="material-symbols-outlined text-xs">warning</span>
+                                      {Math.floor((Date.now() - item.createdAt) / (24 * 60 * 60 * 1000))}d
+                                    </span>
+                                  )}
                                 </div>
                               ))}
                             </div>
                             <div className="mt-3 pt-3" style={{ borderTop: "1px solid var(--color-outline-variant)" }}>
                               <textarea
                                 value={getHandoff(patient.id).note}
-                                onChange={(e) => updateHandoffNote(patient.id, e.target.value)}
+                                onChange={(e) => {
+                                  updateHandoffNote(patient.id, e.target.value);
+                                  e.target.style.height = "auto";
+                                  e.target.style.height = `${e.target.scrollHeight}px`;
+                                }}
+                                onKeyDown={(e) => handleNoteKeyDown(e, (v) => updateHandoffNote(patient.id, v))}
+                                onPaste={smart.handlePaste}
                                 placeholder="Free text notes..."
-                                rows={3}
                                 className="w-full bg-transparent text-sm outline-none resize-none"
-                                style={{ color: "var(--color-on-surface)" }}
+                                style={{ color: "var(--color-on-surface)", minHeight: "72px" }}
                               />
+                              {smart.pasteConfirmation && (
+                                <p className="text-xs mt-1 animate-pulse" style={{ color: "var(--color-primary)" }}>
+                                  {smart.pasteConfirmation}
+                                </p>
+                              )}
                             </div>
                           </div>
                         </td>

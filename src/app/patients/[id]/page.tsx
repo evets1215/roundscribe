@@ -8,6 +8,17 @@ import { garyBaileyNote, IcdCode, type Patient } from "@/lib/data";
 import { extractRawNoteText } from "@/lib/patient-records";
 import type { StructuredNote } from "@/lib/medgemma";
 import DiffNoteView from "@/components/DiffNoteView";
+import {
+  type TaskStatus,
+  type HandoffItem,
+  STATUS_ICON,
+  STATUS_COLOR,
+  handleNoteKeyDown,
+} from "@/lib/handoff-types";
+import { useHandoff } from "@/hooks/useHandoff";
+import { useSmartInput } from "@/hooks/useSmartInput";
+import { extractTasksFromNewLines, type ExtractedTask } from "@/lib/task-extractor";
+import { matchResultToTasks, type TaskMatch } from "@/lib/loop-closure";
 
 type GenerateState =
   | { status: "idle" }
@@ -51,31 +62,6 @@ function computeLineDiff(before: string, after: string): DiffLine[] {
   return result;
 }
 
-type TaskStatus = "pending" | "awaiting_result" | "done" | "carry_forward" | "resolved";
-interface HandoffItem { id: string; text: string; status: TaskStatus; createdAt?: number; }
-interface HandoffData { items: HandoffItem[]; note: string; }
-
-const STATUS_CYCLE: TaskStatus[] = ["pending", "done", "awaiting_result", "carry_forward"];
-const STATUS_ICON: Record<TaskStatus, string> = {
-  pending:        "radio_button_unchecked",
-  done:           "check_circle",
-  awaiting_result:"hourglass_empty",
-  carry_forward:  "arrow_forward",
-  resolved:       "cancel",
-};
-const STATUS_COLOR: Record<TaskStatus, string> = {
-  pending:        "var(--color-on-surface-variant)",
-  done:           "#16a34a",
-  awaiting_result:"var(--color-amber, #d97706)",
-  carry_forward:  "var(--color-primary)",
-  resolved:       "var(--color-outline)",
-};
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function migrateItem(raw: any): HandoffItem {
-  if (raw.status) return raw as HandoffItem;
-  return { id: raw.id, text: raw.text, status: raw.done ? "done" : "pending", createdAt: raw.createdAt } as HandoffItem;
-}
 
 function buildHandoffText(items: HandoffItem[], note: string): string {
   const byStatus = (s: TaskStatus) => items.filter((i) => i.status === s && i.text.trim());
@@ -209,10 +195,9 @@ function LineDiffView({
   );
 }
 
-export default function PatientDetailPage() {
+/** Reusable workspace component — can be embedded or used standalone */
+export function PatientWorkspace({ patientId, embedded = false }: { patientId: string; embedded?: boolean }) {
   const router = useRouter();
-  const params = useParams();
-  const patientId = (params?.id as string) ?? "unknown";
 
   // Gary Bailey is the demo patient with pre-loaded note data
   const isNewPatient = patientId !== "gary-bailey";
@@ -243,9 +228,111 @@ export default function PatientDetailPage() {
   const editorRef = useRef<HTMLDivElement>(null);
 
   const [generateState, setGenerateState] = useState<GenerateState>({ status: "idle" });
-  const [handoffItems, setHandoffItems] = useState<HandoffItem[]>([]);
-  const [handoffNote, setHandoffNote] = useState("");
-  const [pendingFocusId, setPendingFocusId] = useState<string | null>(null);
+  const handoff = useHandoff(patientId);
+
+  // ── Loop closure state ──────────────────────────────────────────────────
+  const [loopMatches, setLoopMatches] = useState<TaskMatch[]>([]);
+  const [recentResolutions, setRecentResolutions] = useState<Array<{ match: TaskMatch; undoData: { id: string; prevStatus: string } }>>([]);
+
+  const smart = useSmartInput({
+    onPaste: (parsed) => {
+      const items = handoff.getHandoff(patientId).items;
+      const matches = matchResultToTasks(parsed, items);
+      if (matches.length === 0) return;
+
+      // High confidence (>0.9): auto-resolve with undo banner
+      // Medium confidence (0.5-0.9): show suggestion
+      const autoResolve = matches.filter((m) => m.confidence > 0.9);
+      const suggestions = matches.filter((m) => m.confidence > 0.5 && m.confidence <= 0.9);
+
+      for (const match of autoResolve) {
+        const task = items.find((i) => i.id === match.taskId);
+        if (!task) continue;
+        const prevStatus = task.status;
+        // Resolve the task
+        handoff.setAllHandoff((prev) => {
+          const d = prev[patientId];
+          if (!d) return prev;
+          return {
+            ...prev,
+            [patientId]: {
+              ...d,
+              items: d.items.map((i) =>
+                i.id === match.taskId ? { ...i, status: "resolved" as const } : i,
+              ),
+            },
+          };
+        });
+        setRecentResolutions((prev) => [...prev, { match, undoData: { id: match.taskId, prevStatus } }]);
+        // Auto-clear the undo banner after 8s
+        setTimeout(() => {
+          setRecentResolutions((prev) => prev.filter((r) => r.match.taskId !== match.taskId));
+        }, 8000);
+      }
+
+      if (suggestions.length > 0) {
+        setLoopMatches((prev) => [...prev, ...suggestions]);
+      }
+    },
+  });
+
+  const handoffItems = handoff.getHandoff(patientId).items;
+  const handoffNote = handoff.getHandoff(patientId).note;
+  // Thin wrappers so inline keyboard handlers (Enter/Backspace) keep working
+  const setHandoffItems = (updater: (prev: HandoffItem[]) => HandoffItem[]) => {
+    handoff.setAllHandoff(prev => {
+      const d = prev[patientId] ?? { items: [], note: "" };
+      return { ...prev, [patientId]: { ...d, items: updater(d.items) } };
+    });
+  };
+  const setHandoffNote = (note: string) => handoff.updateNote(patientId, note);
+  const { setPendingFocusId } = handoff;
+
+  // ── Task extraction from free text ──────────────────────────────────────
+  const [suggestedTasks, setSuggestedTasks] = useState<ExtractedTask[]>([]);
+  const prevNoteText = useRef(handoffNote);
+
+  // Run deterministic extraction when the note changes (on newline)
+  useEffect(() => {
+    if (handoffNote === prevNoteText.current) return;
+    const prev = prevNoteText.current;
+    prevNoteText.current = handoffNote;
+
+    // Only extract when a new line was added (Enter pressed)
+    if (!handoffNote.includes("\n") || handoffNote.split("\n").length <= prev.split("\n").length) return;
+
+    const extracted = extractTasksFromNewLines(prev, handoffNote);
+    if (extracted.length > 0) {
+      setSuggestedTasks((s) => [...s, ...extracted]);
+    }
+  }, [handoffNote]);
+
+  const acceptSuggestedTask = (task: ExtractedTask) => {
+    handoff.addItem(patientId, undefined, task.text);
+    // Find the new item and set its status
+    setTimeout(() => {
+      handoff.setAllHandoff((prev) => {
+        const d = prev[patientId];
+        if (!d) return prev;
+        const lastItem = d.items[d.items.length - 1];
+        if (lastItem && lastItem.text === task.text) {
+          return {
+            ...prev,
+            [patientId]: {
+              ...d,
+              items: d.items.map((i) => i.id === lastItem.id ? { ...i, status: task.status } : i),
+            },
+          };
+        }
+        return prev;
+      });
+    }, 50);
+    setSuggestedTasks((s) => s.filter((t) => t !== task));
+  };
+
+  const dismissSuggestedTask = (task: ExtractedTask) => {
+    setSuggestedTasks((s) => s.filter((t) => t !== task));
+  };
 
   const [mobilePane, setMobilePane] = useState<"prior" | "handoff" | "note">("prior");
   const [showNotifications, setShowNotifications] = useState(false);
@@ -412,71 +499,33 @@ export default function PatientDetailPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // run once on mount only
 
-  // Load handoff from localStorage on mount
+  // Seed demo data for Gary Bailey on mount (if no handoff exists yet)
+  const handoffSeeded = useRef(false);
   useEffect(() => {
-    try {
-      const all = JSON.parse(localStorage.getItem("rs-handoff") ?? "{}") as Record<string, HandoffData>;
-      const d = all[patientId] ?? { items: [], note: "" };
-      const items = d.items?.length ? d.items : [{ id: `h-${Date.now()}`, text: "", done: false }];
-      if (!isNewPatient) {
-        // Gary Bailey demo — pre-populated handoff items
-        setHandoffItems([
+    if (handoffSeeded.current) return;
+    handoffSeeded.current = true;
+    if (!isNewPatient && handoffItems.length === 0) {
+      handoff.setPatientHandoff(patientId, {
+        items: [
           { id: "gb-1", text: "restart rivaroxaban today", status: "pending" },
           { id: "gb-2", text: "titrate oxycodone to 10mg", status: "pending" },
           { id: "gb-3", text: "hgb stable — no transfusion needed", status: "done" },
-        ]);
-      } else {
-        setHandoffItems(items.map(migrateItem));
-        setHandoffNote(d.note ?? "");
-      }
-    } catch {
-      setHandoffItems([{ id: `h-${Date.now()}`, text: "", status: "pending" }]);
+        ],
+        note: "",
+      });
+    } else if (isNewPatient && handoffItems.length === 0) {
+      handoff.setPatientHandoff(patientId, {
+        items: [{ id: `h-${Date.now()}`, text: "", status: "pending" }],
+        note: "",
+      });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Persist handoff back to localStorage (keeps dashboard in sync)
-  useEffect(() => {
-    if (!isNewPatient) return;
-    try {
-      const all = JSON.parse(localStorage.getItem("rs-handoff") ?? "{}") as Record<string, HandoffData>;
-      all[patientId] = { items: handoffItems, note: handoffNote };
-      localStorage.setItem("rs-handoff", JSON.stringify(all));
-    } catch {}
-  }, [handoffItems, handoffNote, patientId, isNewPatient]);
-
-  // Focus newly added checklist items
-  useEffect(() => {
-    if (!pendingFocusId) return;
-    document.getElementById(`hi-${pendingFocusId}`)?.focus();
-    setPendingFocusId(null);
-  }, [pendingFocusId]);
-
-  const cycleHandoffStatus = (id: string) =>
-    setHandoffItems((prev) => prev.map((i) => {
-      if (i.id !== id) return i;
-      const idx = STATUS_CYCLE.indexOf(i.status);
-      const next = STATUS_CYCLE[(idx + 1) % STATUS_CYCLE.length];
-      return { ...i, status: next };
-    }));
-
-  const updateHandoffItem = (id: string, text: string) =>
-    setHandoffItems((prev) => prev.map((i) => i.id === id ? { ...i, text } : i));
-
-  const addHandoffItem = (afterId?: string) => {
-    const newItem: HandoffItem = { id: `h-${Date.now()}-${Math.random()}`, text: "", status: "pending", createdAt: Date.now() };
-    setHandoffItems((prev) => {
-      if (!afterId) return [...prev, newItem];
-      const idx = prev.findIndex((i) => i.id === afterId);
-      const next = [...prev];
-      next.splice(idx + 1, 0, newItem);
-      return next;
-    });
-    setPendingFocusId(newItem.id);
-  };
-
-  const removeHandoffItem = (id: string) =>
-    setHandoffItems((prev) => prev.length > 1 ? prev.filter((i) => i.id !== id) : prev);
+  const cycleHandoffStatus = (id: string) => handoff.cycleStatus(patientId, id);
+  const updateHandoffItem = (id: string, text: string) => handoff.updateItem(patientId, id, text);
+  const addHandoffItem = (afterId?: string, initialText = "") => handoff.addItem(patientId, afterId, initialText);
+  const removeHandoffItem = (id: string) => handoff.removeItem(patientId, id);
 
   const execFormat = (command: string, value?: string) => {
     document.execCommand(command, false, value);
@@ -513,11 +562,8 @@ export default function PatientDetailPage() {
   };
 
 
-  return (
-    <div className="flex h-screen overflow-hidden" style={{ backgroundColor: "var(--color-surface)" }}>
-      <AppSidebar />
-
-      <main className="md:ml-64 flex-1 flex flex-col min-w-0" style={{ backgroundColor: "var(--color-surface)" }}>
+  const outerContent = (
+      <main className={`${embedded ? "" : "md:ml-64"} flex-1 flex flex-col min-w-0`} style={{ backgroundColor: "var(--color-surface)" }}>
         {/* Header */}
         <header
           className="sticky top-0 z-10 shrink-0 bg-white"
@@ -841,8 +887,46 @@ export default function PatientDetailPage() {
                             value={item.text}
                             onChange={(e) => updateHandoffItem(item.id, e.target.value)}
                             onKeyDown={(e) => {
-                              if (e.key === "Enter") { e.preventDefault(); addHandoffItem(item.id); }
-                              if (e.key === "Backspace" && item.text === "") { e.preventDefault(); removeHandoffItem(item.id); }
+                              if (smart.handleKeyDown(e, () => item.text, (v) => updateHandoffItem(item.id, v))) return;
+                              if (e.key === "Enter") {
+                                e.preventDefault();
+                                const pos = e.currentTarget.selectionStart ?? item.text.length;
+                                const before = item.text.slice(0, pos);
+                                const after = item.text.slice(pos);
+                                const newId = `h-${Date.now()}-${Math.random()}`;
+                                setHandoffItems(prev => {
+                                  const updated = prev.map(i => i.id === item.id ? { ...i, text: before } : i);
+                                  const i2 = updated.findIndex(i => i.id === item.id);
+                                  updated.splice(i2 + 1, 0, { id: newId, text: after, status: "pending" as TaskStatus, createdAt: Date.now() });
+                                  return updated;
+                                });
+                                setPendingFocusId(newId);
+                              }
+                              if (e.key === "ArrowUp" && idx > 0) {
+                                const pos = e.currentTarget.selectionStart ?? 0;
+                                e.preventDefault();
+                                const prevEl = document.getElementById(`hi-${handoffItems[idx - 1].id}`) as HTMLInputElement | null;
+                                if (prevEl) { prevEl.focus(); prevEl.setSelectionRange(Math.min(pos, handoffItems[idx - 1].text.length), Math.min(pos, handoffItems[idx - 1].text.length)); }
+                              }
+                              if (e.key === "ArrowDown" && idx < handoffItems.length - 1) {
+                                const pos = e.currentTarget.selectionStart ?? 0;
+                                e.preventDefault();
+                                const nextEl = document.getElementById(`hi-${handoffItems[idx + 1].id}`) as HTMLInputElement | null;
+                                if (nextEl) { nextEl.focus(); nextEl.setSelectionRange(Math.min(pos, handoffItems[idx + 1].text.length), Math.min(pos, handoffItems[idx + 1].text.length)); }
+                              }
+                              if (e.key === "Backspace" && idx > 0 && e.currentTarget.selectionStart === 0 && e.currentTarget.selectionEnd === 0) {
+                                e.preventDefault();
+                                const prevItem = handoffItems[idx - 1];
+                                const cursorPos = prevItem.text.length;
+                                const merged = prevItem.text + item.text;
+                                setHandoffItems(prev => prev.map(i => i.id === prevItem.id ? { ...i, text: merged } : i).filter(i => i.id !== item.id));
+                                requestAnimationFrame(() => {
+                                  const el = document.getElementById(`hi-${prevItem.id}`) as HTMLInputElement | null;
+                                  if (el) { el.focus(); el.setSelectionRange(cursorPos, cursorPos); }
+                                });
+                              } else if (e.key === "Backspace" && item.text === "" && idx === 0 && handoffItems.length > 1) {
+                                e.preventDefault(); removeHandoffItem(item.id);
+                              }
                             }}
                             placeholder={idx === 0 ? "Add task..." : ""}
                             className="flex-1 bg-transparent text-sm focus:outline-none min-h-[36px]"
@@ -859,6 +943,16 @@ export default function PatientDetailPage() {
                           >
                             {item.status.replace("_", " ")}
                           </span>
+                          {item.status === "carry_forward" && item.createdAt && Date.now() - item.createdAt > 3 * 24 * 60 * 60 * 1000 && (
+                            <span
+                              className="text-[9px] font-bold shrink-0 flex items-center gap-0.5"
+                              style={{ color: "var(--warning)" }}
+                              title={`Carried forward for ${Math.floor((Date.now() - item.createdAt) / (24 * 60 * 60 * 1000))} days — consider resolving or re-carrying`}
+                            >
+                              <span className="material-symbols-outlined text-xs">warning</span>
+                              {Math.floor((Date.now() - item.createdAt) / (24 * 60 * 60 * 1000))}d
+                            </span>
+                          )}
                           <button
                             onClick={() => removeHandoffItem(item.id)}
                             className="opacity-0 group-hover:opacity-100 p-1 rounded transition-opacity shrink-0"
@@ -884,13 +978,159 @@ export default function PatientDetailPage() {
                       </p>
                       <textarea
                         value={handoffNote}
-                        onChange={(e) => setHandoffNote(e.target.value)}
+                        onChange={(e) => {
+                          setHandoffNote(e.target.value);
+                          e.target.style.height = "auto";
+                          e.target.style.height = `${e.target.scrollHeight}px`;
+                        }}
+                        onKeyDown={(e) => handleNoteKeyDown(e, setHandoffNote)}
+                        onPaste={smart.handlePaste}
                         placeholder="Free text notes..."
-                        rows={4}
                         className="w-full bg-transparent text-sm focus:outline-none resize-none"
-                        style={{ color: "var(--color-on-surface)" }}
+                        style={{ color: "var(--color-on-surface)", minHeight: "88px" }}
                       />
+                      {smart.pasteConfirmation && (
+                        <p className="text-xs mt-1 animate-pulse" style={{ color: "var(--color-primary)" }}>
+                          {smart.pasteConfirmation}
+                        </p>
+                      )}
                     </div>
+
+                    {/* Task extraction suggestions */}
+                    {suggestedTasks.length > 0 && (
+                      <div className="px-1 pt-3 pb-1 flex flex-col gap-2" style={{ borderTop: "1px solid rgba(191,200,204,0.2)" }}>
+                        <p className="text-[10px] font-bold uppercase tracking-widest" style={{ color: "var(--color-on-surface-variant)" }}>
+                          Suggested tasks
+                        </p>
+                        {suggestedTasks.map((task, idx) => (
+                          <div
+                            key={`${task.text}-${idx}`}
+                            className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs"
+                            style={{ backgroundColor: "var(--color-surface-container)", border: "1px solid var(--color-outline-variant, rgba(191,200,204,0.3))" }}
+                          >
+                            <span className="material-symbols-outlined text-sm" style={{ color: "var(--color-primary)" }}>
+                              add_task
+                            </span>
+                            <span className="flex-1" style={{ color: "var(--color-on-surface)" }}>
+                              {task.text}
+                            </span>
+                            <button
+                              onClick={() => acceptSuggestedTask(task)}
+                              className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold transition-all active:scale-95"
+                              style={{ backgroundColor: "var(--color-primary)", color: "#fff" }}
+                            >
+                              Add
+                            </button>
+                            <button
+                              onClick={() => dismissSuggestedTask(task)}
+                              className="flex items-center px-1 py-1 rounded transition-opacity hover:opacity-70"
+                              style={{ color: "var(--color-on-surface-variant)" }}
+                            >
+                              <span className="material-symbols-outlined text-sm">close</span>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Loop closure: auto-resolution banners */}
+                    {recentResolutions.length > 0 && (
+                      <div className="flex flex-col gap-2 pt-3" style={{ borderTop: "1px solid rgba(191,200,204,0.2)" }}>
+                        {recentResolutions.map((r) => (
+                          <div
+                            key={r.match.taskId}
+                            className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs"
+                            style={{ backgroundColor: "rgba(22,163,74,0.08)", border: "1px solid rgba(22,163,74,0.2)" }}
+                          >
+                            <span className="material-symbols-outlined text-sm" style={{ color: "#16a34a" }}>check_circle</span>
+                            <span className="flex-1" style={{ color: "#15803d" }}>
+                              {r.match.summary} resolved task
+                            </span>
+                            <button
+                              onClick={() => {
+                                // Undo: restore previous status
+                                handoff.setAllHandoff((prev) => {
+                                  const d = prev[patientId];
+                                  if (!d) return prev;
+                                  return {
+                                    ...prev,
+                                    [patientId]: {
+                                      ...d,
+                                      items: d.items.map((i) =>
+                                        i.id === r.undoData.id
+                                          ? { ...i, status: r.undoData.prevStatus as HandoffItem["status"] }
+                                          : i,
+                                      ),
+                                    },
+                                  };
+                                });
+                                setRecentResolutions((prev) => prev.filter((x) => x.match.taskId !== r.match.taskId));
+                              }}
+                              className="text-[10px] font-bold px-2 py-1 rounded transition-all active:scale-95"
+                              style={{ color: "#15803d", border: "1px solid rgba(22,163,74,0.3)" }}
+                            >
+                              Undo
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Loop closure: suggestion banners */}
+                    {loopMatches.length > 0 && (
+                      <div className="flex flex-col gap-2 pt-3" style={{ borderTop: "1px solid rgba(191,200,204,0.2)" }}>
+                        <p className="text-[10px] font-bold uppercase tracking-widest" style={{ color: "var(--color-on-surface-variant)" }}>
+                          Result matches
+                        </p>
+                        {loopMatches.map((match, idx) => {
+                          const taskItem = handoffItems.find((i) => i.id === match.taskId);
+                          return (
+                            <div
+                              key={`${match.taskId}-${idx}`}
+                              className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs"
+                              style={{ backgroundColor: "rgba(217,119,6,0.06)", border: "1px solid rgba(217,119,6,0.2)" }}
+                            >
+                              <span className="material-symbols-outlined text-sm" style={{ color: "#d97706" }}>link</span>
+                              <span className="flex-1" style={{ color: "var(--color-on-surface)" }}>
+                                <strong>{match.summary}</strong>
+                                {taskItem ? ` may ${match.action} "${taskItem.text}"` : ""}
+                              </span>
+                              <button
+                                onClick={() => {
+                                  handoff.setAllHandoff((prev) => {
+                                    const d = prev[patientId];
+                                    if (!d) return prev;
+                                    return {
+                                      ...prev,
+                                      [patientId]: {
+                                        ...d,
+                                        items: d.items.map((i) =>
+                                          i.id === match.taskId
+                                            ? { ...i, status: match.action === "resolve" ? "resolved" as const : i.status }
+                                            : i,
+                                        ),
+                                      },
+                                    };
+                                  });
+                                  setLoopMatches((prev) => prev.filter((m) => m.taskId !== match.taskId));
+                                }}
+                                className="text-[10px] font-bold px-2 py-1 rounded transition-all active:scale-95"
+                                style={{ backgroundColor: "var(--color-primary)", color: "#fff" }}
+                              >
+                                Apply
+                              </button>
+                              <button
+                                onClick={() => setLoopMatches((prev) => prev.filter((m) => m.taskId !== match.taskId))}
+                                className="flex items-center px-1 py-1 rounded transition-opacity hover:opacity-70"
+                                style={{ color: "var(--color-on-surface-variant)" }}
+                              >
+                                <span className="material-symbols-outlined text-sm">close</span>
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
 
                   {/* Generate button row */}
@@ -973,6 +1213,20 @@ export default function PatientDetailPage() {
                     </div>
                   </div>
 
+                  {/* Warning if some ops failed to match lines in the prior note */}
+                  {generateState.note.failedOps && generateState.note.failedOps.length > 0 && (
+                    <div
+                      className="mx-5 mt-3 md:mx-6 px-3 py-2 rounded-md flex items-start gap-2 text-[11px]"
+                      style={{ backgroundColor: "var(--warning-bg)", color: "#92400e" }}
+                    >
+                      <span className="material-symbols-outlined text-sm mt-px" style={{ color: "var(--warning)" }}>warning</span>
+                      <span>
+                        <strong>{generateState.note.failedOps.length} edit{generateState.note.failedOps.length > 1 ? "s" : ""}</strong> could not be matched to lines in your prior note and may be missing.
+                        Review the diff carefully.
+                      </span>
+                    </div>
+                  )}
+
                   {/* Generated note content — inline diff view */}
                   <div className="flex-1 overflow-hidden flex flex-col">
                     <LineDiffView
@@ -1039,6 +1293,20 @@ export default function PatientDetailPage() {
           ) : null}
         </div>
       </main>
+  );
+
+  if (embedded) return outerContent;
+
+  return (
+    <div className="flex h-screen overflow-hidden" style={{ backgroundColor: "var(--color-surface)" }}>
+      <AppSidebar />
+      {outerContent}
     </div>
   );
+}
+
+export default function PatientDetailPage() {
+  const params = useParams();
+  const patientId = (params?.id as string) ?? "unknown";
+  return <PatientWorkspace patientId={patientId} />;
 }

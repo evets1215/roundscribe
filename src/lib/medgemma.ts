@@ -49,6 +49,9 @@ export interface StructuredNote {
   /** Surgical ops used to produce rawText (present when format === "SOAP" via handoff) */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   ops?: any[];
+  /** Ops that failed to match any line in the prior note (Phase A quality signal) */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  failedOps?: any[];
 }
 
 export interface MedGemmaAdapter {

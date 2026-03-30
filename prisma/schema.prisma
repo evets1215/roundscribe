@@ -1,13 +1,12 @@
 // Prisma schema for Roundscribe
-// Local dev: docker compose up -d → runs Postgres on localhost:5432
-// Run migrations: npx prisma migrate dev --name init
+// SQLite for local dev — zero-config, no Docker needed
 
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
-  provider = "postgresql"
+  provider = "sqlite"
 }
 
 // ── Auth.js required models ────────────────────────────────────────────────
@@ -18,12 +17,12 @@ model Account {
   type              String
   provider          String
   providerAccountId String
-  refresh_token     String? @db.Text
-  access_token      String? @db.Text
+  refresh_token     String?
+  access_token      String?
   expires_at        Int?
   token_type        String?
   scope             String?
-  id_token          String? @db.Text
+  id_token          String?
   session_state     String?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -58,10 +57,11 @@ model User {
   image         String?
   role          String    @default("physician")
 
-  accounts  Account[]
-  sessions  Session[]
-  patients  Patient[]
-  auditLogs AuditLog[]
+  accounts     Account[]
+  sessions     Session[]
+  patients     Patient[]
+  auditLogs    AuditLog[]
+  handoffTasks HandoffTask[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -74,8 +74,10 @@ model Patient {
   mrn    String
   dob    String
   sex    String
-  status String @default("Pending")
+  status String  @default("Pending")
   pinned Boolean @default(false)
+
+  handoffNote String @default("")
 
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -83,6 +85,7 @@ model Patient {
   notes      Note[]
   recordings AudioRecording[]
   auditLogs  AuditLog[]
+  tasks      HandoffTask[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -94,9 +97,11 @@ model Note {
   id        String @id @default(cuid())
   patientId String
 
-  transcript String @db.Text
-  noteJson   Json
-  audioKey   String?
+  transcript    String
+  noteJson      Json
+  audioKey      String?
+  type          String  @default("generated") // manual-paste | generated | accepted
+  sourceTaskIds Json?   // JSON array of HandoffTask IDs that contributed to this note
 
   patient Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
 
@@ -119,6 +124,29 @@ model AudioRecording {
   createdAt DateTime @default(now())
 
   @@index([patientId])
+}
+
+model HandoffTask {
+  id         String    @id @default(cuid())
+  patientId  String
+  userId     String
+  text       String
+  status     String    @default("pending")
+  source     String    @default("manual") // manual | parsed | paste
+  dayNumber  Int       @default(1)
+  sortOrder  Int       @default(0)
+  resolvedAt DateTime?
+  resolvedBy String?   // user | loop_closure
+  resolvedNote String?
+
+  patient Patient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([patientId, status])
+  @@index([userId])
 }
 
 model AuditLog {
